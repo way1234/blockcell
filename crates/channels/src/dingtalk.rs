@@ -347,8 +347,9 @@ impl DingTalkChannel {
             .unwrap_or("");
 
         let sender_id = data
-            .get("senderId")
+            .get("senderStaffId")
             .and_then(|v| v.as_str())
+            .or_else(|| data.get("senderId").and_then(|v| v.as_str()))
             .unwrap_or("")
             .to_string();
 
@@ -465,10 +466,18 @@ impl DingTalkChannel {
             }
         };
 
+        // For 1:1 chats (conversationType "1"), use sender_id as chat_id
+        // because oToMessages/batchSend requires a userId, not conversationId.
+        let effective_chat_id = if conversation_type == "1" {
+            sender_id.clone()
+        } else {
+            conversation_id
+        };
+
         let inbound = InboundMessage {
             channel: "dingtalk".to_string(),
             sender_id: sender_id.clone(),
-            chat_id: conversation_id,
+            chat_id: effective_chat_id,
             content,
             media: media_paths,
             metadata: serde_json::json!({
