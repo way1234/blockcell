@@ -16,17 +16,81 @@ blockcell [OPTIONS] <COMMAND>
 
 ---
 
-## onboard — 初始化配置
+## setup — 交互式配置向导（推荐）
+
+```
+blockcell setup [OPTIONS]
+```
+
+首次使用时推荐运行，通过交互式向导完成 LLM provider 和可选渠道的配置。相比 `onboard`，`setup` 提供更友好的引导流程和自动验证。
+
+| 选项 | 说明 |
+|------|------|
+| `--force` | 重置现有配置为默认值后再开始设置 |
+| `--provider <NAME>` | 指定 LLM provider（deepseek/openai/kimi/anthropic/gemini/zhipu/minimax/ollama） |
+| `--api-key <KEY>` | 指定 provider 的 API key |
+| `--model <MODEL>` | 指定模型名（如 deepseek-chat、moonshot-v1-8k、claude-sonnet-4-20250514） |
+| `--channel <NAME>` | 可选渠道配置（telegram/feishu/wecom/dingtalk/lark/skip） |
+| `--skip-provider-test` | 跳过保存后的 provider 配置验证 |
+
+**支持的 provider:**
+- `deepseek` - 推荐，性价比高
+- `openai` - GPT-4o 等模型
+- `kimi` (moonshot) - 国内访问稳定
+- `anthropic` (claude) - Claude 系列
+- `gemini` - Google Gemini
+- `zhipu` - 智谱 GLM
+- `minimax` - MiniMax
+- `ollama` - 本地模型，免费
+
+**支持的渠道:**
+- `telegram` - Telegram Bot
+- `feishu` - 飞书机器人
+- `wecom` - 企业微信
+- `dingtalk` - 钉钉
+- `lark` - Lark
+- `skip` - 跳过渠道配置（仅使用 WebUI）
+
+**示例：**
+```bash
+# 交互式向导（推荐）
+blockcell setup
+
+# 非交互式，直接指定 provider
+blockcell setup --provider deepseek --api-key sk-xxx --model deepseek-chat
+
+# 同时配置渠道
+blockcell setup --provider kimi --api-key sk-xxx --channel telegram
+
+# 重置配置后重新设置
+blockcell setup --force
+
+# 跳过验证（加快设置速度）
+blockcell setup --provider ollama --skip-provider-test
+```
+
+**向导流程：**
+1. 选择 LLM provider（或输入 skip 跳过）
+2. 输入 API key（ollama 除外）
+3. 选择或确认模型名称
+4. 可选：配置一个消息渠道
+5. 自动验证 provider 配置（除非使用 `--skip-provider-test`）
+6. 显示配置摘要和下一步操作提示
+
+---
+
+## onboard — 初始化配置（传统方式）
 
 ```
 blockcell onboard [OPTIONS]
 ```
 
-首次使用时运行，创建配置文件和工作区目录。
+创建配置文件和工作区目录。相比 `setup`，`onboard` 更适合脚本化部署或已熟悉配置结构的用户。
 
 | 选项 | 说明 |
 |------|------|
 | `--force` | 强制覆盖已有配置 |
+| `--interactive` | 交互式向导模式 |
 | `--provider <NAME>` | 指定 LLM provider（如 deepseek、openai、kimi、anthropic） |
 | `--api-key <KEY>` | 指定 provider 的 API key |
 | `--model <MODEL>` | 指定模型名（如 deepseek-chat、moonshot-v1-8k） |
@@ -34,7 +98,7 @@ blockcell onboard [OPTIONS]
 
 **示例：**
 ```bash
-# 交互式向导（默认）
+# 创建默认配置
 blockcell onboard
 
 # 非交互式，直接指定 provider
@@ -43,6 +107,8 @@ blockcell onboard --provider deepseek --api-key sk-xxx --model deepseek-chat
 # 仅重新配置渠道
 blockcell onboard --channels-only
 ```
+
+**注意：** 新用户推荐使用 `blockcell setup` 而非 `onboard`，前者提供更友好的引导体验。
 
 ---
 

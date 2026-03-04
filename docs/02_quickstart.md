@@ -16,14 +16,12 @@
 
 ## 5分钟最短路径（照做就能跑起来）
 
-如果你只想最快跑通一次，按下面 5 步即可：
+如果你只想最快跑通一次,按下面 3 步即可:
 
-1. 安装：运行安装脚本
-2. 初始化：`blockcell onboard`
-3. 配置：编辑 `~/.blockcell/config.json`，填一个可用的 Provider（推荐 DeepSeek 或 Kimi）
-4. 检查：`blockcell status`，确保全部是 ✓
-5. 启动：`blockcell agent`，随便发一句话测试
-
+1. 安装:运行安装脚本
+2. 配置:`blockcell setup`(交互式向导,自动完成初始化和配置)
+3. 启动:`blockcell agent`,随便发一句话测试
+4. 启动:`blockcell gateway`,浏览器打开http://127.0.0.1:18792:, 查看webui
 后面的内容会更详细（多 Provider 选择、常用命令、FAQ、部署建议），你可以在跑通后再慢慢看。
 
 ---
@@ -63,16 +61,50 @@ blockcell --version
 
 ---
 
-## 第二步：初始化
+## 第二步：配置(推荐使用 setup 向导)
+
+### 方式一:交互式向导(推荐)
+
+```bash
+blockcell setup
+```
+
+这个命令会:
+1. 创建 `~/.blockcell/` 目录结构
+2. 引导你选择 LLM provider(DeepSeek/OpenAI/Kimi/Anthropic/Gemini/Zhipu/MiniMax/Ollama)
+3. 配置 API Key 和模型
+4. 可选:配置一个消息渠道(Telegram/飞书/企业微信/钉钉/Lark)
+5. 自动验证配置是否有效
+
+**支持的 provider:**
+- `deepseek` - 推荐,便宜且性能好
+- `openai` - GPT-4o 等
+- `kimi` - 国内访问稳定
+- `anthropic` - Claude 系列
+- `gemini` - Google Gemini
+- `zhipu` - 智谱 GLM
+- `minimax` - MiniMax
+- `ollama` - 本地模型,免费
+
+**非交互式用法:**
+```bash
+# 直接指定 provider 和 API key
+blockcell setup --provider deepseek --api-key sk-xxx --model deepseek-chat
+
+# 同时配置渠道
+blockcell setup --provider kimi --api-key sk-xxx --channel telegram
+
+# 重置配置后重新设置
+blockcell setup --force
+```
+
+### 方式二:使用 onboard(传统方式)
 
 ```bash
 blockcell onboard
 ```
 
-这个命令会：
-1. 创建 `~/.blockcell/` 目录结构
-2. 生成默认配置文件 `~/.blockcell/config.json`
-3. 打印一个简短的引导说明
+这个命令会创建目录结构和默认配置文件,但需要手动编辑 `config.json`
 
 目录结构长这样：
 
@@ -89,9 +121,9 @@ blockcell onboard
 
 ---
 
-## 第三步：配置 API Key
+## 第三步:手动配置 API Key(如果没用 setup 向导)
 
-打开配置文件：
+如果你使用了 `blockcell setup`,可以跳过这一步。如果使用了 `blockcell onboard`,需要手动编辑配置:
 
 ```bash
 # macOS
@@ -101,7 +133,7 @@ open ~/.blockcell/config.json
 nano ~/.blockcell/config.json
 ```
 
-找到 `providers` 部分，填入你的 API Key。
+找到 `providers` 部分,填入你的 API Key。
 
 ### 选项 A：使用 DeepSeek（最便宜，推荐新手）
 
@@ -117,7 +149,16 @@ DeepSeek 的 API 非常便宜，适合测试：
   },
   "agents": {
     "defaults": {
-      "model": "deepseek-chat"
+      "model": "deepseek-chat",
+      "provider": "deepseek",
+      "modelPool": [
+        {
+          "model": "deepseek-chat",
+          "provider": "deepseek",
+          "weight": 1,
+          "priority": 1
+        }
+      ]
     }
   }
 }
@@ -130,12 +171,21 @@ DeepSeek 的 API 非常便宜，适合测试：
   "providers": {
     "kimi": {
       "apiKey": "sk-你的Kimi密钥",
-      "apiBase": "https://api.moonshot.cn/v1"
+      "apiBase": "https://api.moonshot.ai/v1"
     }
   },
   "agents": {
     "defaults": {
-      "model": "kimi/moonshot-v1-8k"
+      "model": "moonshot-v1-8k",
+      "provider": "kimi",
+      "modelPool": [
+        {
+          "model": "moonshot-v1-8k",
+          "provider": "kimi",
+          "weight": 1,
+          "priority": 1
+        }
+      ]
     }
   }
 }
@@ -153,7 +203,16 @@ DeepSeek 的 API 非常便宜，适合测试：
   },
   "agents": {
     "defaults": {
-      "model": "anthropic/claude-sonnet-4-20250514"
+      "model": "anthropic/claude-sonnet-4-20250514",
+      "provider": "openrouter",
+      "modelPool": [
+        {
+          "model": "anthropic/claude-sonnet-4-20250514",
+          "provider": "openrouter",
+          "weight": 1,
+          "priority": 1
+        }
+      ]
     }
   }
 }
@@ -167,12 +226,23 @@ DeepSeek 的 API 非常便宜，适合测试：
 {
   "providers": {
     "ollama": {
-      "apiBase": "http://localhost:11434"
+      "apiKey": "ollama",
+      "apiBase": "http://localhost:11434",
+      "apiType": "ollama"
     }
   },
   "agents": {
     "defaults": {
-      "model": "ollama/llama3"
+      "model": "llama3",
+      "provider": "ollama",
+      "modelPool": [
+        {
+          "model": "llama3",
+          "provider": "ollama",
+          "weight": 1,
+          "priority": 1
+        }
+      ]
     }
   }
 }
@@ -314,14 +384,34 @@ blockcell doctor
   "providers": {
     "openai": {
       "apiKey": "sk-...",
-      "apiBase": "https://api.openai.com/v1"
+      "apiBase": "https://api.openai.com/v1",
+      "apiType": "openai"
+    },
+    "deepseek": {
+      "apiKey": "sk-...",
+      "apiBase": "https://api.deepseek.com/v1"
     }
   },
   "agents": {
     "defaults": {
       "model": "gpt-4o",
-      "maxTokens": 4096,
-      "temperature": 0.7
+      "provider": "openai",
+      "maxTokens": 8192,
+      "temperature": 0.7,
+      "modelPool": [
+        {
+          "model": "gpt-4o",
+          "provider": "openai",
+          "weight": 2,
+          "priority": 1
+        },
+        {
+          "model": "deepseek-chat",
+          "provider": "deepseek",
+          "weight": 1,
+          "priority": 2
+        }
+      ]
     }
   },
   "tools": {
@@ -341,6 +431,25 @@ blockcell doctor
   }
 }
 ```
+
+### modelPool 多模型高可用配置
+
+`modelPool` 是一个可选的高级功能，用于配置多模型负载均衡和自动降级：
+
+**字段说明：**
+- `model`: 模型名称（如 "gpt-4o"、"deepseek-chat"）
+- `provider`: 对应 providers 表中的 key
+- `weight`: 负载均衡权重（正整数，越大越优先被选中），默认 1
+- `priority`: 优先级（小数字 = 高优先级），同优先级内按 weight 加权随机，默认 1
+- `inputPrice`: 可选，输入价格（USD/1M tokens）
+- `outputPrice`: 可选，输出价格（USD/1M tokens）
+
+**使用场景：**
+1. **多模型负载均衡**：同 priority 下配置多个模型，按 weight 加权随机选择
+2. **自动降级**：主模型失败时自动切换到备用模型（通过 priority 控制）
+3. **成本优化**：配置价格信息，系统可根据成本选择模型
+
+**注意：** 如果不配置 `modelPool`，系统将使用传统的单 `model` + `provider` 配置（向后兼容）。
 
 ---
 
