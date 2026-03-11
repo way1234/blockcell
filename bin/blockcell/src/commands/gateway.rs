@@ -1275,6 +1275,7 @@ pub async fn run(cli_host: Option<String>, cli_port: Option<u16>) -> anyhow::Res
     #[cfg(feature = "wecom")]
     for listener in blockcell_channels::account::wecom_listener_configs(&config) {
         let listener_name = listener.label.clone();
+        info!(listener = %listener_name, "Starting WeCom listener");
         let wecom = Arc::new(WeComChannel::new(listener.config, inbound_tx.clone()));
         let shutdown_rx = shutdown_tx.subscribe();
         channel_handles.push((

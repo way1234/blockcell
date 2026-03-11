@@ -718,12 +718,18 @@ pub struct LarkAccountConfig {
 pub struct WeComAccountConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_wecom_mode")]
+    pub mode: String,
     #[serde(default)]
     pub corp_id: String,
     #[serde(default)]
     pub corp_secret: String,
     #[serde(default)]
     pub agent_id: i64,
+    #[serde(default)]
+    pub bot_id: String,
+    #[serde(default)]
+    pub bot_secret: String,
     #[serde(default)]
     pub callback_token: String,
     #[serde(default)]
@@ -732,6 +738,10 @@ pub struct WeComAccountConfig {
     pub allow_from: Vec<String>,
     #[serde(default = "default_wecom_poll_interval")]
     pub poll_interval_secs: u32,
+    #[serde(default = "default_wecom_ws_url")]
+    pub ws_url: String,
+    #[serde(default = "default_wecom_ping_interval")]
+    pub ping_interval_secs: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -902,6 +912,8 @@ pub struct LarkConfig {
 pub struct WeComConfig {
     #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_wecom_mode")]
+    pub mode: String,
     /// Enterprise corp ID (企业ID)
     #[serde(default)]
     pub corp_id: String,
@@ -911,6 +923,12 @@ pub struct WeComConfig {
     /// Application agent ID (应用AgentId)
     #[serde(default)]
     pub agent_id: i64,
+    /// Long connection bot_id (智能机器人 BotID)
+    #[serde(default)]
+    pub bot_id: String,
+    /// Long connection secret (智能机器人 Secret)
+    #[serde(default)]
+    pub bot_secret: String,
     /// Callback token for message verification (企业微信回调Token)
     #[serde(default)]
     pub callback_token: String,
@@ -923,27 +941,50 @@ pub struct WeComConfig {
     /// Polling interval in seconds (used when callback is not configured). Default: 10.
     #[serde(default = "default_wecom_poll_interval")]
     pub poll_interval_secs: u32,
+    /// Long connection websocket url.
+    #[serde(default = "default_wecom_ws_url")]
+    pub ws_url: String,
+    /// Long connection ping interval in seconds. Default: 30.
+    #[serde(default = "default_wecom_ping_interval")]
+    pub ping_interval_secs: u32,
     #[serde(default)]
     pub accounts: HashMap<String, WeComAccountConfig>,
     #[serde(default)]
     pub default_account_id: Option<String>,
 }
 
+fn default_wecom_mode() -> String {
+    "webhook".to_string()
+}
+
 fn default_wecom_poll_interval() -> u32 {
     10
+}
+
+fn default_wecom_ws_url() -> String {
+    "wss://openws.work.weixin.qq.com".to_string()
+}
+
+fn default_wecom_ping_interval() -> u32 {
+    30
 }
 
 impl Default for WeComConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            mode: default_wecom_mode(),
             corp_id: String::new(),
             corp_secret: String::new(),
             agent_id: 0,
+            bot_id: String::new(),
+            bot_secret: String::new(),
             callback_token: String::new(),
             encoding_aes_key: String::new(),
             allow_from: Vec::new(),
             poll_interval_secs: default_wecom_poll_interval(),
+            ws_url: default_wecom_ws_url(),
+            ping_interval_secs: default_wecom_ping_interval(),
             accounts: HashMap::new(),
             default_account_id: None,
         }

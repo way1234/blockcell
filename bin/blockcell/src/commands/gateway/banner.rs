@@ -320,8 +320,17 @@ pub(super) fn print_startup_banner(
             name: "WeCom",
             enabled: ch.wecom.enabled,
             configured: blockcell_channels::account::channel_configured(config, "wecom"),
-            detail: if !ch.wecom.corp_id.is_empty() {
-                format!("agent_id: {}", ch.wecom.agent_id)
+            detail: if ch.wecom.mode == "long_connection"
+                || ch.wecom.mode == "long-connection"
+                || ch.wecom.mode == "stream"
+            {
+                if !ch.wecom.bot_id.is_empty() {
+                    format!("mode: {}  bot_id: {}", ch.wecom.mode, ch.wecom.bot_id)
+                } else {
+                    "no bot_id configured".into()
+                }
+            } else if !ch.wecom.corp_id.is_empty() {
+                format!("mode: {}  agent_id: {}", ch.wecom.mode, ch.wecom.agent_id)
             } else {
                 "no corp_id configured".into()
             },

@@ -755,8 +755,9 @@ impl OpenAIProvider {
         }
 
         {
-            let end = truncate_at_char_boundary(&raw_body, 500);
-            info!(body_len = raw_body.len(), preview = %&raw_body[..end], "LLM raw response");
+            let trimmed = raw_body.trim_start();
+            let end = truncate_at_char_boundary(trimmed, 500);
+            info!(body_len = raw_body.len(), preview = %&trimmed[..end], "LLM raw response");
         }
 
         let chat_response: ChatResponse = serde_json::from_str(&raw_body).map_err(|e| {

@@ -193,13 +193,18 @@ impl ChannelManager {
                         ));
                     }
                     cfg.channels.wecom.enabled = acc.enabled;
+                    cfg.channels.wecom.mode = acc.mode.clone();
                     cfg.channels.wecom.corp_id = acc.corp_id.clone();
                     cfg.channels.wecom.corp_secret = acc.corp_secret.clone();
                     cfg.channels.wecom.agent_id = acc.agent_id;
+                    cfg.channels.wecom.bot_id = acc.bot_id.clone();
+                    cfg.channels.wecom.bot_secret = acc.bot_secret.clone();
                     cfg.channels.wecom.callback_token = acc.callback_token.clone();
                     cfg.channels.wecom.encoding_aes_key = acc.encoding_aes_key.clone();
                     cfg.channels.wecom.allow_from = acc.allow_from.clone();
                     cfg.channels.wecom.poll_interval_secs = acc.poll_interval_secs;
+                    cfg.channels.wecom.ws_url = acc.ws_url.clone();
+                    cfg.channels.wecom.ping_interval_secs = acc.ping_interval_secs;
                 }
             }
             "lark" => {

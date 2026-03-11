@@ -252,17 +252,36 @@ pub fn wecom_listener_configs(config: &Config) -> Vec<ListenerConfig> {
         "wecom",
         config,
         &config.channels.wecom.accounts,
-        |account| account.enabled && !account.corp_id.is_empty(),
-        |cfg| !cfg.channels.wecom.corp_id.is_empty(),
+        |account| {
+            account.enabled
+                && (
+                    !account.corp_id.is_empty()
+                        || (account.mode == "long_connection"
+                            || account.mode == "long-connection"
+                            || account.mode == "stream")
+                            && !account.bot_id.is_empty()
+                )
+        },
+        |cfg| {
+            let mode = cfg.channels.wecom.mode.as_str();
+            !cfg.channels.wecom.corp_id.is_empty()
+                || ((mode == "long_connection" || mode == "long-connection" || mode == "stream")
+                    && !cfg.channels.wecom.bot_id.is_empty())
+        },
         |scoped, account_id, account: &WeComAccountConfig| {
             scoped.channels.wecom.enabled = account.enabled;
+            scoped.channels.wecom.mode = account.mode.clone();
             scoped.channels.wecom.corp_id = account.corp_id.clone();
             scoped.channels.wecom.corp_secret = account.corp_secret.clone();
             scoped.channels.wecom.agent_id = account.agent_id;
+            scoped.channels.wecom.bot_id = account.bot_id.clone();
+            scoped.channels.wecom.bot_secret = account.bot_secret.clone();
             scoped.channels.wecom.callback_token = account.callback_token.clone();
             scoped.channels.wecom.encoding_aes_key = account.encoding_aes_key.clone();
             scoped.channels.wecom.allow_from = account.allow_from.clone();
             scoped.channels.wecom.poll_interval_secs = account.poll_interval_secs;
+            scoped.channels.wecom.ws_url = account.ws_url.clone();
+            scoped.channels.wecom.ping_interval_secs = account.ping_interval_secs;
             scoped.channels.wecom.accounts = HashMap::from([(account_id.to_string(), account.clone())]);
             scoped.channels.wecom.default_account_id = Some(account_id.to_string());
         },
@@ -557,13 +576,18 @@ mod tests {
             "ops".to_string(),
             WeComAccountConfig {
                 enabled: true,
+                mode: "webhook".to_string(),
                 corp_id: "corp-ops".to_string(),
                 corp_secret: "secret-ops".to_string(),
                 agent_id: 7,
+                bot_id: String::new(),
+                bot_secret: String::new(),
                 callback_token: "token-ops".to_string(),
                 encoding_aes_key: "aes-ops".to_string(),
                 allow_from: vec!["alice".to_string()],
                 poll_interval_secs: 99,
+                ws_url: String::new(),
+                ping_interval_secs: 30,
             },
         );
 
@@ -688,13 +712,18 @@ mod tests {
             "ops".to_string(),
             WeComAccountConfig {
                 enabled: true,
+                mode: "webhook".to_string(),
                 corp_id: "corp-a".to_string(),
                 corp_secret: "secret".to_string(),
                 agent_id: 42,
+                bot_id: String::new(),
+                bot_secret: String::new(),
                 callback_token: String::new(),
                 encoding_aes_key: String::new(),
                 allow_from: vec![],
                 poll_interval_secs: 30,
+                ws_url: String::new(),
+                ping_interval_secs: 30,
             },
         );
 
