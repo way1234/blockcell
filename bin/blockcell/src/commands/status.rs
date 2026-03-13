@@ -470,6 +470,7 @@ mod tests {
             priority: 1,
             input_price: None,
             output_price: None,
+            tool_call_mode: blockcell_core::config::ToolCallMode::Native,
         }];
         config.agents.defaults.provider = Some("deepseek".to_string());
         config.agents.defaults.model = "deepseek-chat".to_string();
@@ -495,6 +496,7 @@ mod tests {
             priority: 1,
             input_price: None,
             output_price: None,
+            tool_call_mode: blockcell_core::config::ToolCallMode::Native,
         }];
         config.agents.defaults.provider = Some("ollama".to_string());
         config.agents.defaults.model = "llama3".to_string();
