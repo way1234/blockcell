@@ -2317,15 +2317,8 @@ impl AgentRuntime {
                                                 usage: response.usage.clone(),
                                             });
 
-                                            // 发送 message_done 事件表示消息完成
-                                            if let Some(ref event_tx) = self.event_tx {
-                                                let event = serde_json::json!({
-                                                    "type": "message_done",
-                                                    "agent_id": self.agent_id.clone().unwrap_or_else(|| "default".to_string()),
-                                                    "chat_id": msg.chat_id.clone(),
-                                                });
-                                                let _ = event_tx.send(event.to_string());
-                                            }
+                                            // 注意：message_done 事件在函数末尾统一发送（第2808-2827行）
+                                            // 这里不再重复发送，避免前端收到两次导致重复显示
                                             break;
                                         }
                                         StreamChunk::Error { message } => {
