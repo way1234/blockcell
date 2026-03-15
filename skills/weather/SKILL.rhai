@@ -112,7 +112,7 @@ let weather_text = "";
 if weather_data.is_map() && weather_data["text"] != () {
     weather_text = weather_data["text"].to_string();
     // 简单判断是否是 JSON（以 { 开头）
-    if weather_text.trim().starts_with("{") {
+    if weather_text.starts_with("{") {
         got_json = true;
     }
 }

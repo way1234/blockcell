@@ -639,6 +639,8 @@ fn map_to_json(map: &Map) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn test_simple_skill_script() {
@@ -825,5 +827,43 @@ mod tests {
         assert!(result.success);
         assert_eq!(result.output["method"], "search");
         assert_eq!(result.output["query"], "blockcell");
+    }
+
+    #[test]
+    fn test_weather_skill_script_handles_wttr_json_response() {
+        let dispatcher = SkillDispatcher::new();
+        let script_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../skills/weather/SKILL.rhai");
+        let script = fs::read_to_string(&script_path).expect("read weather skill script");
+
+        let mut ctx = HashMap::new();
+        ctx.insert(
+            "ctx".to_string(),
+            serde_json::json!({
+                "user_input": "深圳天气",
+            }),
+        );
+
+        let result = dispatcher
+            .execute_sync(&script, "深圳天气", ctx, |name, params| {
+                assert_eq!(name, "web_fetch");
+                let url = params
+                    .get("url")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default();
+                if url.contains("format=j1") {
+                    Ok(serde_json::json!({
+                        "text": r#"{"current_condition":[{"temp_C":"28","FeelsLikeC":"31","humidity":"80","windspeedKmph":"12","winddir16Point":"SE","weatherDesc":[{"value":"Partly cloudy"}],"uvIndex":"6","visibility":"10","pressure":"1008"}],"weather":[{"date":"2026-03-15","maxtempC":"30","mintempC":"24"},{"date":"2026-03-16","maxtempC":"29","mintempC":"23"},{"date":"2026-03-17","maxtempC":"28","mintempC":"22"}],"nearest_area":[{"areaName":[{"value":"Shenzhen"}]}]}"#
+                    }))
+                } else {
+                    Err(Error::Tool(format!("unexpected url: {}", url)))
+                }
+            })
+            .expect("weather skill should execute");
+
+        assert!(result.success);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.output["success"].as_bool(), Some(true));
+        assert_eq!(result.output["source"].as_str(), Some("wttr.in"));
     }
 }

@@ -197,7 +197,6 @@ impl ContextBuilder {
             "",
             &[],
             &[],
-            None,
         )
     }
 
@@ -211,13 +210,9 @@ impl ContextBuilder {
         }
         let manager = self.skill_manager.as_ref()?;
         let skill = manager.match_skill(user_input, disabled_skills)?;
-        let prompt_md = skill.load_md()?;
-        let inject_prompt_md = skill
-            .meta
-            .execution
-            .as_ref()
-            .map(|execution| execution.normalized_kind() == "markdown")
-            .unwrap_or(true);
+        let prompt_md = skill.load_prompt_bundle()?;
+        let inject_prompt_md =
+            !skill.path.join("SKILL.py").exists() && !skill.path.join("SKILL.rhai").exists();
         Some(ActiveSkillContext {
             name: skill.name.clone(),
             prompt_md,
@@ -247,13 +242,9 @@ impl ContextBuilder {
         if !skill.available {
             return None;
         }
-        let prompt_md = skill.load_md()?;
-        let inject_prompt_md = skill
-            .meta
-            .execution
-            .as_ref()
-            .map(|execution| execution.normalized_kind() == "markdown")
-            .unwrap_or(true);
+        let prompt_md = skill.load_prompt_bundle()?;
+        let inject_prompt_md =
+            !skill.path.join("SKILL.py").exists() && !skill.path.join("SKILL.rhai").exists();
         Some(ActiveSkillContext {
             name: skill.name.clone(),
             prompt_md,
@@ -281,7 +272,6 @@ impl ContextBuilder {
         user_query: &str,
         available_tool_names: &[String],
         tool_prompt_rules: &[String],
-        continuation_context: Option<&serde_json::Value>,
     ) -> String {
         let mut prompt = String::new();
         let is_chat = matches!(mode, InteractionMode::Chat);
@@ -348,15 +338,6 @@ impl ContextBuilder {
             "Workspace: {}\n\n",
             self.paths.workspace().display()
         ));
-
-        if let Some(context_json) =
-            Self::serialize_continuation_context_for_prompt(continuation_context)
-        {
-            prompt.push_str("## Continuation Context\n");
-            prompt.push_str("Use this structured context from recent tool results to resolve follow-up references like file names, titles, or ordinal mentions such as `第2个` before deciding whether to call tools again.\n");
-            prompt.push_str(&context_json);
-            prompt.push_str("\n\n");
-        }
 
         if is_skill_mode || is_general {
             if let Some(ref store) = self.memory_store {
@@ -465,7 +446,6 @@ impl ContextBuilder {
         pending_intent: bool,
         available_tool_names: &[String],
         tool_prompt_rules: &[String],
-        continuation_context: Option<&serde_json::Value>,
     ) -> Vec<ChatMessage> {
         let mut messages = Vec::new();
         let is_im_channel = matches!(
@@ -489,36 +469,22 @@ impl ContextBuilder {
             user_content,
             available_tool_names,
             tool_prompt_rules,
-            continuation_context,
         );
         let system_tokens = estimate_tokens(&system_prompt);
         messages.push(ChatMessage::system(&system_prompt));
 
-        let followup_hint =
-            Self::build_followup_resolution_hint(user_content, continuation_context);
-
         let user_msg = if media.is_empty() {
             let trimmed = Self::trim_text_head_tail(user_content, 4000);
-            let enriched = if let Some(hint) = &followup_hint {
-                format!("{}\n\n[Follow-up Reference]\n{}", trimmed, hint)
-            } else {
-                trimmed
-            };
-            ChatMessage::user(&enriched)
+            ChatMessage::user(&trimmed)
         } else {
             let trimmed = Self::trim_text_head_tail(user_content, 4000);
-            let enriched = if let Some(hint) = &followup_hint {
-                format!("{}\n\n[Follow-up Reference]\n{}", trimmed, hint)
-            } else {
-                trimmed
-            };
             let all_paths: Vec<&str> = media
                 .iter()
                 .filter(|p| !p.is_empty())
                 .map(|p| p.as_str())
                 .collect();
             let text_with_paths = if all_paths.is_empty() {
-                enriched
+                trimmed
             } else {
                 let paths_str = all_paths
                     .iter()
@@ -527,7 +493,7 @@ impl ContextBuilder {
                     .join("\n");
                 format!(
                     "{}\n\n[附件本地路径（发回给用户时请用此路径）]\n{}",
-                    enriched, paths_str
+                    trimmed, paths_str
                 )
             };
             if pending_intent {
@@ -563,80 +529,6 @@ impl ContextBuilder {
 
         messages.push(user_msg);
         messages
-    }
-
-    fn serialize_continuation_context_for_prompt(
-        continuation_context: Option<&serde_json::Value>,
-    ) -> Option<String> {
-        let context = continuation_context?;
-        let obj = context.as_object()?;
-        if obj.is_empty() {
-            return None;
-        }
-
-        let json = serde_json::to_string_pretty(context).ok()?;
-        Some(Self::trim_text_head_tail(&json, 1600))
-    }
-
-    fn build_followup_resolution_hint(
-        user_content: &str,
-        continuation_context: Option<&serde_json::Value>,
-    ) -> Option<String> {
-        let context = continuation_context?;
-        let filesystem = context.get("filesystem")?;
-        let entries = filesystem.get("entries")?.as_array()?;
-
-        if let Some(target_index) = Self::extract_ordinal_reference(user_content) {
-            if let Some(item) = entries.iter().find(|entry| {
-                entry.get("index").and_then(|v| v.as_u64()) == Some(target_index as u64)
-            }) {
-                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("item");
-                let path = item.get("path").and_then(|v| v.as_str())?;
-                return Some(format!(
-                    "The user's ordinal reference matches item #{}: `{}` -> `{}`. Use this exact path directly for filesystem tools.",
-                    target_index, name, path
-                ));
-            }
-        }
-
-        for item in entries {
-            let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            if name.is_empty() || !user_content.contains(name) {
-                continue;
-            }
-            let Some(path) = item.get("path").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            return Some(format!(
-                "In the previous filesystem result, `{}` resolves to `{}`. Use this exact path directly for filesystem tools instead of searching again.",
-                name, path
-            ));
-        }
-
-        None
-    }
-
-    fn extract_ordinal_reference(user_content: &str) -> Option<usize> {
-        let chars: Vec<char> = user_content.chars().collect();
-        for (idx, ch) in chars.iter().enumerate() {
-            if *ch != '第' {
-                continue;
-            }
-            let mut digits = String::new();
-            for next in chars.iter().skip(idx + 1) {
-                if next.is_ascii_digit() {
-                    digits.push(*next);
-                } else {
-                    break;
-                }
-            }
-            if !digits.is_empty() {
-                return digits.parse::<usize>().ok();
-            }
-        }
-        None
     }
 
     fn build_multimodal_message(&self, text: &str, media: &[String]) -> ChatMessage {
@@ -705,17 +597,41 @@ impl ContextBuilder {
         Some(format!("data:{};base64,{}", mime_type, base64_str))
     }
 
-    /// Method E: Smart history compression with dynamic token budget.
-    /// - Recent 15 rounds: kept in full (trimmed per-message)
-    /// - Older rounds: compressed to user question + final assistant answer (tool calls stripped)
-    /// - Fills from newest to oldest, stopping when token budget is exhausted
-    /// - Falls back to hard cap of 30 messages as safety net
+    /// Compress history by whole rounds so tool chains are never split.
+    /// - Prefer keeping the latest 6 complete rounds intact
+    /// - If over budget, degrade intact preservation to 4, then 2, then fully-compressed history
+    /// - Older rounds are summarized to `user + final assistant`
+    /// - Within each mode, keep the newest contiguous history that fits
     fn compress_history(history: &[ChatMessage], token_budget: usize) -> Vec<ChatMessage> {
         if history.is_empty() || token_budget == 0 {
             return Vec::new();
         }
 
-        // Split history into "rounds" — each round starts with a user message
+        let rounds = Self::split_history_into_rounds(history);
+        if rounds.is_empty() {
+            return Vec::new();
+        }
+
+        let mut preserved_candidates = Vec::new();
+        for candidate in [6usize, 4, 2, 0] {
+            let capped = candidate.min(rounds.len());
+            if preserved_candidates.last().copied() != Some(capped) {
+                preserved_candidates.push(capped);
+            }
+        }
+
+        for preserved_count in preserved_candidates {
+            if let Some(compressed) =
+                Self::compress_history_with_preserved_rounds(&rounds, preserved_count, token_budget)
+            {
+                return compressed;
+            }
+        }
+
+        Self::fallback_latest_round(&rounds)
+    }
+
+    fn split_history_into_rounds<'a>(history: &'a [ChatMessage]) -> Vec<Vec<&'a ChatMessage>> {
         let mut rounds: Vec<Vec<&ChatMessage>> = Vec::new();
         let mut current_round: Vec<&ChatMessage> = Vec::new();
 
@@ -726,97 +642,101 @@ impl ContextBuilder {
             }
             current_round.push(msg);
         }
+
         if !current_round.is_empty() {
             rounds.push(current_round);
         }
 
-        let total_rounds = rounds.len();
+        rounds
+    }
 
-        // Phase 1: Build recent rounds (last 15) in full, with per-message trim
-        let mut recent_msgs: Vec<ChatMessage> = Vec::new();
-        let recent_start = total_rounds.saturating_sub(15);
-        for round in &rounds[recent_start..] {
-            for msg in round {
-                recent_msgs.push(Self::trim_chat_message(msg));
-            }
-        }
-        let recent_tokens: usize = recent_msgs.iter().map(|m| estimate_message_tokens(m)).sum();
+    fn compress_history_with_preserved_rounds(
+        rounds: &[Vec<&ChatMessage>],
+        preserved_count: usize,
+        token_budget: usize,
+    ) -> Option<Vec<ChatMessage>> {
+        let preserved_start = rounds.len().saturating_sub(preserved_count);
+        let mut preserved_messages = Vec::new();
+        let mut preserved_tokens = 0usize;
 
-        // If recent rounds alone exceed budget, just return them (trimmed harder)
-        if recent_tokens >= token_budget {
-            // Hard-trim recent messages to fit
-            let mut result = Vec::new();
-            let mut used = 0usize;
-            for msg in recent_msgs.into_iter().rev() {
-                let t = estimate_message_tokens(&msg);
-                if used + t > token_budget && !result.is_empty() {
-                    break;
-                }
-                used += t;
-                result.push(msg);
+        for round in &rounds[preserved_start..] {
+            let intact_round = Self::build_intact_round(round);
+            let intact_tokens = Self::estimate_history_tokens(&intact_round);
+            preserved_tokens += intact_tokens;
+            if preserved_tokens > token_budget {
+                return None;
             }
-            result.reverse();
-            // Safety: skip any leading orphaned tool messages caused by the trim above
-            let safe = Self::find_safe_history_start(&result);
-            if safe > 0 {
-                result = result.split_off(safe);
-            }
-            return result;
+            preserved_messages.extend(intact_round);
         }
 
-        // Phase 2: Fill older rounds (compressed) from newest to oldest within remaining budget
-        let remaining_budget = token_budget.saturating_sub(recent_tokens);
-        let mut older_msgs: Vec<ChatMessage> = Vec::new();
+        let remaining_budget = token_budget.saturating_sub(preserved_tokens);
+        let mut older_rounds_reversed: Vec<Vec<ChatMessage>> = Vec::new();
         let mut older_tokens = 0usize;
 
-        // Iterate older rounds in reverse (newest-old first) so we keep the most relevant
-        for i in (0..recent_start).rev() {
-            let round = &rounds[i];
-            // Compress: keep user question + final assistant text only
-            let user_msg = round.iter().find(|m| m.role == "user");
-            let final_assistant = round
-                .iter()
-                .rev()
-                .find(|m| m.role == "assistant" && m.tool_calls.is_none());
-
-            if let Some(user) = user_msg {
-                let user_text = Self::content_text(user);
-                let assistant_text = final_assistant
-                    .map(|m| Self::content_text(m))
-                    .unwrap_or_else(|| "(completed with tool calls)".to_string());
-
-                let u = ChatMessage::user(&Self::trim_text_head_tail(&user_text, 200));
-                let a = ChatMessage::assistant(&Self::trim_text_head_tail(&assistant_text, 400));
-                let pair_tokens = estimate_message_tokens(&u) + estimate_message_tokens(&a);
-
-                if older_tokens + pair_tokens > remaining_budget {
-                    break; // Budget exhausted
-                }
-                older_tokens += pair_tokens;
-                // Prepend (we're iterating in reverse)
-                older_msgs.push(u);
-                older_msgs.push(a);
+        for round in rounds[..preserved_start].iter().rev() {
+            let Some(compressed_round) = Self::build_compressed_round(round) else {
+                continue;
+            };
+            let compressed_tokens = Self::estimate_history_tokens(&compressed_round);
+            if older_tokens + compressed_tokens > remaining_budget {
+                break;
             }
-        }
-        // Reverse because we built it newest-first
-        older_msgs.reverse();
-
-        // Combine: older compressed + recent full
-        let mut result = older_msgs;
-        result.extend(recent_msgs);
-
-        // Safety cap: never exceed 30 messages regardless of budget
-        let max_messages = 30;
-        if result.len() > max_messages {
-            result = result.split_off(result.len() - max_messages);
-            // After split_off, the new head may be an orphaned tool message
-            let safe = Self::find_safe_history_start(&result);
-            if safe > 0 {
-                result = result.split_off(safe);
-            }
+            older_tokens += compressed_tokens;
+            older_rounds_reversed.push(compressed_round);
         }
 
-        result
+        older_rounds_reversed.reverse();
+
+        let mut result = Vec::new();
+        for round in older_rounds_reversed {
+            result.extend(round);
+        }
+        result.extend(preserved_messages);
+
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
+    fn build_intact_round(round: &[&ChatMessage]) -> Vec<ChatMessage> {
+        round.iter().map(|msg| Self::trim_chat_message(msg)).collect()
+    }
+
+    fn build_compressed_round(round: &[&ChatMessage]) -> Option<Vec<ChatMessage>> {
+        let user_msg = round.iter().find(|msg| msg.role == "user")?;
+        let final_assistant = round
+            .iter()
+            .rev()
+            .find(|msg| msg.role == "assistant" && msg.tool_calls.is_none())
+            .or_else(|| round.iter().rev().find(|msg| msg.role == "assistant"));
+
+        let user_text = Self::content_text(user_msg);
+        let assistant_text = final_assistant
+            .map(|msg| Self::content_text(msg))
+            .unwrap_or_else(|| "(completed with tool calls)".to_string());
+
+        Some(vec![
+            ChatMessage::user(&Self::trim_text_head_tail(&user_text, 200)),
+            ChatMessage::assistant(&Self::trim_text_head_tail(&assistant_text, 400)),
+        ])
+    }
+
+    fn estimate_history_tokens(messages: &[ChatMessage]) -> usize {
+        messages.iter().map(estimate_message_tokens).sum()
+    }
+
+    fn fallback_latest_round(rounds: &[Vec<&ChatMessage>]) -> Vec<ChatMessage> {
+        let Some(latest_round) = rounds.last() else {
+            return Vec::new();
+        };
+
+        if let Some(compressed_round) = Self::build_compressed_round(latest_round) {
+            return compressed_round;
+        }
+
+        Self::build_intact_round(latest_round)
     }
 
     /// Extract text content from a ChatMessage.
@@ -971,8 +891,30 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn build_tool_round(round: usize) -> Vec<ChatMessage> {
+        let call_id = format!("call-{}", round);
+        vec![
+            ChatMessage::user(&format!("user round {}", round)),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: serde_json::Value::String(format!("planning round {}", round)),
+                reasoning_content: None,
+                tool_calls: Some(vec![blockcell_core::types::ToolCallRequest {
+                    id: call_id.clone(),
+                    name: format!("tool_{}", round),
+                    arguments: serde_json::json!({ "round": round }),
+                    thought_signature: None,
+                }]),
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage::tool_result(&call_id, &format!(r#"{{"round":{},"ok":true}}"#, round)),
+            ChatMessage::assistant(&format!("final round {}", round)),
+        ]
+    }
+
     #[test]
-    fn test_resolve_active_skill_by_name_disables_prompt_injection_for_structured_skill() {
+    fn test_resolve_active_skill_by_name_disables_prompt_injection_for_script_skill() {
         let base =
             std::env::temp_dir().join(format!("blockcell-context-test-{}", uuid::Uuid::new_v4()));
         let paths = Paths::with_base(base);
@@ -985,15 +927,11 @@ name: structured_demo
 description: structured demo
 triggers:
   - structured demo
-execution:
-  kind: python
-  entry: SKILL.py
-  dispatch_kind: argv
-  summary_mode: llm
 "#,
         )
         .expect("write meta");
         fs::write(skill_dir.join("SKILL.md"), "structured skill manual").expect("write skill md");
+        fs::write(skill_dir.join("SKILL.py"), "print('ok')").expect("write skill py");
 
         let builder = ContextBuilder::new(paths, Config::default());
 
@@ -1002,6 +940,58 @@ execution:
             .expect("active skill should resolve");
 
         assert!(!ctx.inject_prompt_md);
+    }
+
+    #[test]
+    fn test_resolve_active_skill_by_name_uses_prompt_bundle_not_root_skill_md() {
+        let base =
+            std::env::temp_dir().join(format!("blockcell-context-test-{}", uuid::Uuid::new_v4()));
+        let paths = Paths::with_base(base);
+        let skill_dir = paths.skills_dir().join("prompt_demo");
+        fs::create_dir_all(skill_dir.join("manual")).expect("create manual dir");
+        fs::write(
+            skill_dir.join("meta.yaml"),
+            r#"
+name: prompt_demo
+description: prompt demo
+triggers:
+  - prompt demo
+"#,
+        )
+        .expect("write meta");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"# Prompt Demo
+
+## Shared {#shared}
+Shared rule.
+
+## Prompt {#prompt}
+- [Prompt details](manual/prompt.md#details)
+
+## Planning {#planning}
+Planning-only rule.
+"#,
+        )
+        .expect("write skill md");
+        fs::write(
+            skill_dir.join("manual/prompt.md"),
+            r#"## Prompt details {#details}
+Prompt-only rule.
+"#,
+        )
+        .expect("write prompt child md");
+
+        let builder = ContextBuilder::new(paths, Config::default());
+
+        let ctx = builder
+            .resolve_active_skill_by_name("prompt_demo", &HashSet::new())
+            .expect("active skill should resolve");
+
+        assert!(ctx.inject_prompt_md);
+        assert!(ctx.prompt_md.contains("Shared rule."));
+        assert!(ctx.prompt_md.contains("Prompt-only rule."));
+        assert!(!ctx.prompt_md.contains("Planning-only rule."));
     }
 
     #[test]
@@ -1030,7 +1020,6 @@ execution:
             "",
             &[],
             &[],
-            None,
         );
 
         assert!(prompt.contains("## Active Skill: structured_demo"));
@@ -1039,7 +1028,7 @@ execution:
     }
 
     #[test]
-    fn test_build_messages_includes_followup_resolution_hint_from_continuation_context() {
+    fn test_build_messages_does_not_inject_followup_resolution_hint() {
         let builder = ContextBuilder::new(
             Paths::with_base(
                 std::env::temp_dir()
@@ -1047,20 +1036,6 @@ execution:
             ),
             Config::default(),
         );
-        let continuation_context = serde_json::json!({
-            "filesystem": {
-                "current_dir": "/Users/apple/.blockcell",
-                "entries": [
-                    {
-                        "index": 1,
-                        "name": ".env",
-                        "path": "/Users/apple/.blockcell/.env",
-                        "type": "file"
-                    }
-                ]
-            }
-        });
-
         let messages = builder.build_messages_for_mode_with_channel(
             &[],
             "查看 .env 的内容",
@@ -1073,12 +1048,67 @@ execution:
             false,
             &["read_file".to_string()],
             &[],
-            Some(&continuation_context),
         );
 
         let last = messages.last().expect("user message");
         let content = last.content.as_str().expect("string user content");
         assert!(content.contains("查看 .env 的内容"));
-        assert!(content.contains("/Users/apple/.blockcell/.env"));
+        assert!(!content.contains("[Follow-up Reference]"));
+        assert!(!content.contains("/Users/apple/.blockcell/.env"));
+    }
+
+    #[test]
+    fn test_compress_history_keeps_latest_six_complete_rounds() {
+        let mut history = Vec::new();
+        for round in 1..=8 {
+            history.extend(build_tool_round(round));
+        }
+
+        let compressed = ContextBuilder::compress_history(&history, 50_000);
+
+        assert_eq!(compressed.len(), 28);
+        assert_eq!(compressed[0].content.as_str(), Some("user round 1"));
+        assert_eq!(compressed[1].content.as_str(), Some("final round 1"));
+        assert_eq!(compressed[2].content.as_str(), Some("user round 2"));
+        assert_eq!(compressed[3].content.as_str(), Some("final round 2"));
+
+        let round_three_index = compressed
+            .iter()
+            .position(|msg| msg.content.as_str() == Some("user round 3"))
+            .expect("round 3 should exist");
+        assert_eq!(compressed[round_three_index + 1].role, "assistant");
+        assert!(compressed[round_three_index + 1]
+            .tool_calls
+            .as_ref()
+            .is_some_and(|calls| calls.len() == 1));
+        assert_eq!(compressed[round_three_index + 2].role, "tool");
+        assert_eq!(compressed[round_three_index + 3].content.as_str(), Some("final round 3"));
+    }
+
+    #[test]
+    fn test_compress_history_never_starts_mid_round() {
+        let mut history = Vec::new();
+        for round in 1..=3 {
+            let mut round_msgs = build_tool_round(round);
+            if let Some(ChatMessage {
+                content: serde_json::Value::String(text),
+                ..
+            }) = round_msgs.get_mut(0)
+            {
+                *text = format!("user round {} {}", round, "x".repeat(120));
+            }
+            if let Some(ChatMessage {
+                content: serde_json::Value::String(text),
+                ..
+            }) = round_msgs.get_mut(3)
+            {
+                *text = format!("final round {} {}", round, "y".repeat(160));
+            }
+            history.extend(round_msgs);
+        }
+
+        let compressed = ContextBuilder::compress_history(&history, 140);
+        let first = compressed.first().expect("compressed history should not be empty");
+        assert_eq!(first.role, "user");
     }
 }

@@ -13,7 +13,7 @@ impl Tool for SpawnTool {
             name: "spawn",
             description: "Spawn a background sub-agent to execute a skill or long-running task. \
                 **Preferred usage**: set `skill_name` to run a named skill (e.g. stock_analysis, crypto_tracker) — \
-                the skill's SKILL.rhai will execute with the given params. \
+                the sub-agent will route that skill through the unified skill kernel. \
                 Use `task` (text description) only when no matching skill exists. \
                 DO NOT use spawn if you can answer the user directly — only for async workloads that should not block the current reply.",
             parameters: json!({
@@ -22,7 +22,7 @@ impl Tool for SpawnTool {
                     "skill_name": {
                         "type": "string",
                         "description": "Name of a skill to execute (e.g. 'stock_analysis', 'crypto_tracker'). \
-                            When set, the skill's SKILL.rhai runs directly with the given params. \
+                            When set, the sub-agent forces that skill name and runs the normal skill flow. \
                             PREFERRED over task description when a matching skill exists."
                     },
                     "params": {
@@ -80,26 +80,19 @@ impl Tool for SpawnTool {
             .filter(|s| !s.is_empty());
 
         if let Some(skill) = skill_name {
-            // Skill-based spawn: pass skill_name via the task string with a structured prefix
-            // that run_subagent_task will detect and use to trigger the skill script fast path.
+            // Skill-based spawn: pass only the skill name plus user-facing query text.
+            // The subagent runtime then routes through the normal unified skill kernel.
             let skill_params = params.get("params").cloned().unwrap_or(json!({}));
             let label = params
                 .get("label")
                 .and_then(|v| v.as_str())
                 .unwrap_or(skill);
-            // Structured task: prefix with __SKILL_EXEC__ so subagent can detect and
-            // route to execute_skill_script() instead of LLM processing.
             let user_query = skill_params
                 .get("user_query")
                 .or_else(|| skill_params.get("query"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let task = format!(
-                "__SKILL_EXEC__:{}:{}:{}",
-                skill,
-                serde_json::to_string(&skill_params).unwrap_or_default(),
-                user_query,
-            );
+            let task = format!("__SKILL_EXEC__:{}:{}", skill, user_query);
             spawn_handle.spawn(&task, label, &ctx.channel, &ctx.chat_id)
         } else {
             let task = params["task"].as_str().unwrap_or("");
@@ -115,7 +108,28 @@ impl Tool for SpawnTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SpawnHandle;
+    use blockcell_core::Config;
     use serde_json::json;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    struct CaptureSpawnHandle {
+        captured_task: Arc<Mutex<Option<String>>>,
+    }
+
+    impl SpawnHandle for CaptureSpawnHandle {
+        fn spawn(
+            &self,
+            task: &str,
+            _label: &str,
+            _origin_channel: &str,
+            _origin_chat_id: &str,
+        ) -> Result<Value> {
+            *self.captured_task.lock().expect("capture lock") = Some(task.to_string());
+            Ok(json!({ "ok": true }))
+        }
+    }
 
     #[test]
     fn test_spawn_schema() {
@@ -143,5 +157,48 @@ mod tests {
         assert!(tool
             .validate(&json!({"skill_name": "", "task": ""}))
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_spawn_execute_formats_skill_task_without_legacy_params_blob() {
+        let captured_task = Arc::new(Mutex::new(None));
+        let tool = SpawnTool;
+        let ctx = ToolContext {
+            workspace: PathBuf::from("/tmp/workspace"),
+            builtin_skills_dir: None,
+            session_key: "cli:test".to_string(),
+            channel: "cli".to_string(),
+            account_id: None,
+            chat_id: "chat-1".to_string(),
+            config: Config::default(),
+            permissions: blockcell_core::types::PermissionSet::new(),
+            task_manager: None,
+            memory_store: None,
+            outbound_tx: None,
+            spawn_handle: Some(Arc::new(CaptureSpawnHandle {
+                captured_task: Arc::clone(&captured_task),
+            })),
+            capability_registry: None,
+            core_evolution: None,
+            event_emitter: None,
+            channel_contacts_file: None,
+        };
+
+        tool.execute(
+            ctx,
+            json!({
+                "skill_name": "weather",
+                "params": {
+                    "user_query": "北京天气"
+                }
+            }),
+        )
+        .await
+        .expect("spawn should succeed");
+
+        assert_eq!(
+            captured_task.lock().expect("capture lock").as_deref(),
+            Some("__SKILL_EXEC__:weather:北京天气")
+        );
     }
 }

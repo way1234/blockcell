@@ -442,27 +442,18 @@ impl CronService {
                 (content, metadata)
             }
             "script" => {
-                let kind = job.payload.script_kind.as_deref().unwrap_or("rhai");
                 let skill_name = job.payload.skill_name.as_deref().unwrap_or("unknown");
-                let content = format!(
-                    "[系统定时任务] 执行技能脚本 {} — {}",
-                    skill_name, job.payload.message
-                );
-                let mut metadata = serde_json::json!({
+                let content = job.payload.message.clone();
+                let metadata = serde_json::json!({
                     "job_id": job.id,
                     "job_name": job.name,
-                    "skill_script": true,
-                    "skill_script_kind": kind,
                     "skill_name": skill_name,
+                    "forced_skill_name": skill_name,
+                    "skill_run_mode": "cron",
                     "deliver": job.payload.deliver,
                     "deliver_channel": job.payload.channel,
                     "deliver_to": job.payload.to,
                 });
-                if kind == "python" {
-                    metadata["skill_python"] = serde_json::json!(true);
-                } else {
-                    metadata["skill_rhai"] = serde_json::json!(true);
-                }
                 (content, metadata)
             }
             "agent" => {

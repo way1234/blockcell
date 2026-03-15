@@ -690,19 +690,12 @@ pub(super) async fn handle_evolution_test(
     let skill_dir = state.paths.skills_dir().join(&req.skill_name);
     let builtin_dir = state.paths.builtin_skills_dir().join(&req.skill_name);
 
-    let base_dir = if skill_dir.exists() {
-        skill_dir
-    } else if builtin_dir.exists() {
-        builtin_dir
-    } else {
+    if !skill_dir.exists() && !builtin_dir.exists() {
         return Json(serde_json::json!({
             "status": "failed",
             "error": format!("技能 '{}' 未找到", req.skill_name),
         }));
-    };
-
-    let has_py = base_dir.join("SKILL.py").exists();
-    let has_rhai = base_dir.join("SKILL.rhai").exists();
+    }
 
     let test_pool = match blockcell_providers::ProviderPool::from_config(&state.config) {
         Ok(p) => p,
@@ -736,201 +729,35 @@ pub(super) async fn handle_evolution_test(
 
     let start = std::time::Instant::now();
 
-    if has_py || has_rhai {
-        // Rhai / Python 技能：SKILL.py / SKILL.rhai 是独立脚本，通过 stdin 接收 JSON 参数并返回结果。
-        // 步骤：
-        //   1. 读取 SKILL.md + meta.yaml，了解技能的参数规格
-        //   2. 用轻量 LLM 调用，把用户自然语言输入解析为符合技能参数规格的 JSON
-        //   3. 把该 JSON 作为 stdin 传给脚本执行
+    let inbound = InboundMessage {
+        channel: "webui_test".to_string(),
+        account_id: None,
+        sender_id: "webui_test".to_string(),
+        chat_id: format!("test_{}", chrono::Utc::now().timestamp_millis()),
+        content: req.input.clone(),
+        media: vec![],
+        metadata: serde_json::json!({
+            "skill_test": true,
+            "skill_name": req.skill_name,
+            "forced_skill_name": req.skill_name,
+            "skill_run_mode": "test",
+        }),
+        timestamp_ms: chrono::Utc::now().timestamp_millis(),
+    };
 
-        let skill_md = std::fs::read_to_string(base_dir.join("SKILL.md")).unwrap_or_default();
-        let meta_yaml = std::fs::read_to_string(base_dir.join("meta.yaml")).unwrap_or_default();
-
-        // Step 1: 从 meta.yaml 解析参数默认值，构建 defaults map
-        // 结构: parameters: { field: { type, default, description, ... } }
-        let param_defaults: serde_json::Map<String, serde_json::Value> = {
-            let mut defaults = serde_json::Map::new();
-            if let Ok(yaml_val) = serde_yaml::from_str::<serde_yaml::Value>(&meta_yaml) {
-                if let Some(params) = yaml_val.get("parameters").and_then(|v| v.as_mapping()) {
-                    for (k, v) in params {
-                        if let (Some(key), Some(def)) = (k.as_str(), v.get("default")) {
-                            // convert serde_yaml::Value → serde_json::Value
-                            if let Ok(json_val) = serde_json::to_value(def) {
-                                defaults.insert(key.to_string(), json_val);
-                            }
-                        }
-                    }
-                }
-            }
-            defaults
-        };
-
-        // Step 2: LLM 解析用户输入为 JSON 参数
-        let parse_system = "You are a parameter extraction assistant. \
-            Given a skill's SKILL.md specification and meta.yaml, extract ALL parameters \
-            (including optional ones with their default values) from the user request. \
-            Output ONLY a valid JSON object. No explanation, no markdown, no code fences.";
-
-        let parse_user = format!(
-            "## Skill: {}\n\n## SKILL.md\n{}\n\n## meta.yaml\n{}\n\n\
-            ## User Request\n{}\n\n\
-            Extract ALL parameters. For parameters not mentioned by the user, use the default \
-            values from meta.yaml. Output only the complete JSON parameter object:",
-            req.skill_name, skill_md, meta_yaml, req.input
-        );
-
-        use blockcell_core::types::ChatMessage;
-        let parse_messages = vec![
-            ChatMessage::system(parse_system),
-            ChatMessage::user(&parse_user),
-        ];
-
-        // 复用已有的 provider pool 做轻量解析
-        let parse_pool = match blockcell_providers::ProviderPool::from_config(&state.config) {
-            Ok(p) => p,
-            Err(e) => {
-                return Json(serde_json::json!({
-                    "status": "failed",
-                    "error": format!("No LLM provider: {}", e),
-                }));
-            }
-        };
-
-        let parsed_json = if let Some((pidx, p)) = parse_pool.acquire() {
-            match p.chat(&parse_messages, &[]).await {
-                Ok(resp) => {
-                    parse_pool.report(pidx, blockcell_providers::CallResult::Success);
-                    let text = resp.content.unwrap_or_default();
-                    // 去掉可能的 markdown code fences
-                    let clean = text
-                        .trim()
-                        .trim_start_matches("```json")
-                        .trim_start_matches("```")
-                        .trim_end_matches("```")
-                        .trim()
-                        .to_string();
-                    // 解析为 JSON object，用 meta.yaml defaults 补全缺失字段
-                    if let Ok(serde_json::Value::Object(mut obj)) =
-                        serde_json::from_str::<serde_json::Value>(&clean)
-                    {
-                        for (k, v) in &param_defaults {
-                            obj.entry(k).or_insert_with(|| v.clone());
-                        }
-                        serde_json::Value::Object(obj).to_string()
-                    } else {
-                        // LLM 没返回合法 JSON object：用纯默认值 + 原始输入作为 query
-                        let mut fallback = param_defaults.clone();
-                        fallback.insert(
-                            "query".to_string(),
-                            serde_json::Value::String(req.input.clone()),
-                        );
-                        serde_json::Value::Object(fallback).to_string()
-                    }
-                }
-                Err(e) => {
-                    parse_pool.report(
-                        pidx,
-                        blockcell_providers::ProviderPool::classify_error(&format!("{}", e)),
-                    );
-                    // fallback: defaults + 原始输入作为 query
-                    let mut fallback = param_defaults.clone();
-                    fallback.insert(
-                        "query".to_string(),
-                        serde_json::Value::String(req.input.clone()),
-                    );
-                    serde_json::Value::Object(fallback).to_string()
-                }
-            }
-        } else {
-            // 无可用 provider：defaults + 原始输入
-            let mut fallback = param_defaults.clone();
-            fallback.insert(
-                "query".to_string(),
-                serde_json::Value::String(req.input.clone()),
-            );
-            serde_json::Value::Object(fallback).to_string()
-        };
-
-        // Step 2: 用解析后的 JSON 参数执行脚本
-        let script_kind = if has_py {
-            SkillScriptKind::Python
-        } else {
-            SkillScriptKind::Rhai
-        };
-        let inbound = InboundMessage {
-            channel: "webui_test".to_string(),
-            account_id: None,
-            sender_id: "webui_test".to_string(),
-            chat_id: format!("test_{}", chrono::Utc::now().timestamp_millis()),
-            content: parsed_json,
-            media: vec![],
-            metadata: serde_json::json!({
-                "skill_test": true,
-                "skill_name": req.skill_name,
-            }),
-            timestamp_ms: chrono::Utc::now().timestamp_millis(),
-        };
-        match runtime
-            .execute_skill_script(&req.skill_name, &inbound, script_kind)
-            .await
-        {
-            Ok(output) => Json(serde_json::json!({
-                "status": "completed",
-                "skill_name": req.skill_name,
-                "result": output,
-                "duration_ms": start.elapsed().as_millis() as u64,
-                "dispatch": if has_py { "python" } else { "rhai" },
-            })),
-            Err(e) => Json(serde_json::json!({
-                "status": "failed",
-                "skill_name": req.skill_name,
-                "error": format!("{}", e),
-            })),
-        }
-    } else {
-        // 纯 MD 技能：没有脚本文件，完全由 LLM 根据 SKILL.md 说明书执行逻辑。
-        // 强制注入 SKILL.md 内容到 prompt，不依赖 match_skill trigger 匹配。
-        let skill_md = match std::fs::read_to_string(base_dir.join("SKILL.md")) {
-            Ok(c) => c,
-            Err(_) => {
-                return Json(serde_json::json!({
-                    "status": "failed",
-                    "error": format!("技能 '{}' 缺少 SKILL.md 文件", req.skill_name),
-                }));
-            }
-        };
-
-        let prompt = format!(
-            "[技能说明 - {}]\n\n{}\n\n---\n\n{}",
-            req.skill_name, skill_md, req.input
-        );
-        let inbound = InboundMessage {
-            channel: "webui_test".to_string(),
-            account_id: None,
-            sender_id: "webui_test".to_string(),
-            chat_id: format!("test_{}", chrono::Utc::now().timestamp_millis()),
-            content: prompt,
-            media: vec![],
-            metadata: serde_json::json!({
-                "skill_test": true,
-                "skill_name": req.skill_name,
-            }),
-            timestamp_ms: chrono::Utc::now().timestamp_millis(),
-        };
-        match runtime.process_message(inbound).await {
-            Ok(response) => Json(serde_json::json!({
-                "status": "completed",
-                "skill_name": req.skill_name,
-                "result": response,
-                "duration_ms": start.elapsed().as_millis() as u64,
-                "dispatch": "llm_md",
-            })),
-            Err(e) => Json(serde_json::json!({
-                "status": "failed",
-                "skill_name": req.skill_name,
-                "error": format!("{}", e),
-            })),
-        }
+    match runtime.process_message(inbound).await {
+        Ok(response) => Json(serde_json::json!({
+            "status": "completed",
+            "skill_name": req.skill_name,
+            "result": response,
+            "duration_ms": start.elapsed().as_millis() as u64,
+            "dispatch": "skill_kernel",
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "failed",
+            "skill_name": req.skill_name,
+            "error": format!("{}", e),
+        })),
     }
 }
 

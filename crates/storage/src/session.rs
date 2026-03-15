@@ -270,18 +270,9 @@ mod tests {
         let (store, _dir) = test_store();
         let session_key = "ws:chat-1";
         let metadata = json!({
-            "continuation_context": {
-                "filesystem": {
-                    "current_dir": "/Users/apple/.blockcell",
-                    "entries": [
-                        {
-                            "index": 1,
-                            "name": ".env",
-                            "path": "/Users/apple/.blockcell/.env",
-                            "type": "file"
-                        }
-                    ]
-                }
+            "skill_state": {
+                "last_skill": "deep_analysis",
+                "mode": "chat"
             }
         });
 
@@ -301,8 +292,8 @@ mod tests {
             .load_metadata(session_key)
             .expect("load metadata after save");
         assert_eq!(
-            loaded["continuation_context"]["filesystem"]["entries"][0]["path"],
-            "/Users/apple/.blockcell/.env"
+            loaded["skill_state"]["last_skill"],
+            "deep_analysis"
         );
     }
 }

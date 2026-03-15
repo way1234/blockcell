@@ -3,7 +3,7 @@ use crate::versioning::{VersionManager, VersionSource};
 use blockcell_core::{Paths, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -34,106 +34,6 @@ pub struct SkillMeta {
     /// Fallback strategy when the skill fails.
     #[serde(default)]
     pub fallback: Option<SkillFallback>,
-    /// Structured execution configuration: script entry point and typed actions.
-    #[serde(default)]
-    pub execution: Option<SkillExecution>,
-}
-
-/// Structured execution configuration for a skill (Python/Rhai with explicit typed actions).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SkillExecution {
-    /// Script kind: "python", "rhai", or "markdown".
-    #[serde(default)]
-    pub kind: String,
-    /// Entry point filename, e.g. "SKILL.py".
-    #[serde(default)]
-    pub entry: String,
-    /// Invocation shape used by runtime, e.g. `argv`, `context`, or `prompt`.
-    #[serde(default)]
-    pub dispatch_kind: String,
-    /// Result shaping mode, e.g. `llm`, `direct`, or `none`.
-    #[serde(default)]
-    pub summary_mode: String,
-    /// List of callable actions exposed by this skill.
-    #[serde(default)]
-    pub actions: Vec<SkillAction>,
-}
-
-impl SkillExecution {
-    pub fn normalized_kind(&self) -> &str {
-        let kind = self.kind.trim();
-        if kind.is_empty() {
-            return "markdown";
-        }
-        kind
-    }
-
-    pub fn effective_dispatch_kind(&self) -> &str {
-        let dispatch_kind = self.dispatch_kind.trim();
-        if !dispatch_kind.is_empty() {
-            return dispatch_kind;
-        }
-
-        match self.normalized_kind() {
-            "python" => "argv",
-            "rhai" => "context",
-            "markdown" => "prompt",
-            _ => "prompt",
-        }
-    }
-
-    pub fn effective_summary_mode(&self) -> &str {
-        let summary_mode = self.summary_mode.trim();
-        if !summary_mode.is_empty() {
-            return summary_mode;
-        }
-
-        match self.normalized_kind() {
-            "markdown" => "direct",
-            "python" | "rhai" => "llm",
-            _ => "llm",
-        }
-    }
-}
-
-/// A single callable action within a structured skill.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillAction {
-    /// Action identifier, e.g. "search", "detail".
-    pub name: String,
-    /// Human-readable description shown to the LLM dispatcher.
-    #[serde(default)]
-    pub description: String,
-    /// Optional trigger phrases that hint at this specific action.
-    #[serde(default)]
-    pub triggers: Vec<String>,
-    /// Named arguments accepted by this action.
-    #[serde(default)]
-    pub arguments: HashMap<String, SkillArgument>,
-    /// Command-line argv template. Use `{arg_name}` placeholders, e.g. `["search", "{keyword}"]`.
-    #[serde(default)]
-    pub argv: Vec<String>,
-}
-
-/// Specification for a single argument of a skill action.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SkillArgument {
-    /// Argument type: "string", "integer", "number", "boolean".
-    #[serde(rename = "type", default = "default_arg_type")]
-    pub kind: String,
-    /// Whether this argument must be provided.
-    #[serde(default)]
-    pub required: bool,
-    /// Description shown to the LLM when constructing arguments.
-    #[serde(default)]
-    pub description: String,
-    /// Allowed values (enum constraint).
-    #[serde(default)]
-    pub enum_values: Vec<String>,
-}
-
-fn default_arg_type() -> String {
-    "string".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -169,14 +69,367 @@ impl SkillMeta {
             self.capabilities.clone()
         }
     }
+}
 
-    /// Returns true if this skill has structured execution actions defined.
-    pub fn is_structured_script(&self) -> bool {
-        self.execution
-            .as_ref()
-            .map(|e| !e.actions.is_empty())
-            .unwrap_or(false)
+#[derive(Debug, Clone)]
+struct SkillDocCache {
+    root_md: String,
+    linked_docs: HashMap<PathBuf, String>,
+    linked_sections: HashMap<String, String>,
+    prompt_bundle: String,
+    planning_bundle: String,
+    summary_bundle: String,
+}
+
+impl SkillDocCache {
+    fn load(skill_dir: &Path) -> Result<Option<Self>> {
+        let root_path = skill_dir.join("SKILL.md");
+        if !root_path.exists() {
+            return Ok(None);
+        }
+
+        let root_md = std::fs::read_to_string(&root_path)?;
+        let sections = parse_markdown_sections(&root_md);
+        let has_reserved_sections = ["shared", "prompt", "planning", "summary"]
+            .iter()
+            .any(|anchor| find_section(&sections, anchor).is_some());
+
+        let mut cache = Self {
+            root_md: root_md.clone(),
+            linked_docs: HashMap::new(),
+            linked_sections: HashMap::new(),
+            prompt_bundle: String::new(),
+            planning_bundle: String::new(),
+            summary_bundle: String::new(),
+        };
+
+        if !has_reserved_sections {
+            let fallback = root_md.trim().to_string();
+            cache.prompt_bundle = fallback.clone();
+            cache.planning_bundle = fallback.clone();
+            cache.summary_bundle = fallback;
+            return Ok(Some(cache));
+        }
+
+        let shared = cache
+            .compile_root_section(skill_dir, &root_md, &sections, "shared")?
+            .unwrap_or_default();
+        let prompt = cache
+            .compile_root_section(skill_dir, &root_md, &sections, "prompt")?
+            .unwrap_or_default();
+        let planning = cache
+            .compile_root_section(skill_dir, &root_md, &sections, "planning")?
+            .unwrap_or_default();
+        let summary = cache
+            .compile_root_section(skill_dir, &root_md, &sections, "summary")?
+            .unwrap_or_default();
+
+        cache.prompt_bundle = join_markdown_parts(&[shared.as_str(), prompt.as_str()]);
+        cache.planning_bundle = join_markdown_parts(&[shared.as_str(), planning.as_str()]);
+        cache.summary_bundle = join_markdown_parts(&[shared.as_str(), summary.as_str()]);
+
+        Ok(Some(cache))
     }
+
+    fn compile_root_section(
+        &mut self,
+        skill_dir: &Path,
+        root_md: &str,
+        sections: &[MarkdownSection],
+        anchor: &str,
+    ) -> Result<Option<String>> {
+        let Some(section) = find_section(sections, anchor) else {
+            return Ok(None);
+        };
+        let raw_section = &root_md[section.start..section.end];
+        let expanded = self.expand_root_links(skill_dir, raw_section)?;
+        Ok(Some(expanded.trim().to_string()))
+    }
+
+    fn expand_root_links(&mut self, skill_dir: &Path, text: &str) -> Result<String> {
+        let mut output = String::new();
+
+        for line in text.split_inclusive('\n') {
+            let local_links = extract_markdown_links(line)
+                .into_iter()
+                .filter(|link| is_local_markdown_target(&link.target))
+                .collect::<Vec<_>>();
+
+            if local_links.is_empty() {
+                output.push_str(line);
+                continue;
+            }
+
+            if local_links.len() == 1 && is_link_only_line(line, &local_links[0]) {
+                let included = self.resolve_link_target(skill_dir, &local_links[0].target)?;
+                if !included.is_empty() {
+                    output.push_str(&included);
+                    if !included.ends_with('\n') {
+                        output.push('\n');
+                    }
+                }
+                continue;
+            }
+
+            let mut last = 0usize;
+            for link in local_links {
+                output.push_str(&line[last..link.start]);
+                output.push_str(&self.resolve_link_target(skill_dir, &link.target)?);
+                last = link.end;
+            }
+            output.push_str(&line[last..]);
+        }
+
+        Ok(output)
+    }
+
+    fn resolve_link_target(&mut self, skill_dir: &Path, target: &str) -> Result<String> {
+        let Some((relative_path, section_anchor)) = split_markdown_target(target) else {
+            return Ok(target.to_string());
+        };
+        let canonical_path = resolve_markdown_path(skill_dir, relative_path)?;
+        let doc_text = if let Some(existing) = self.linked_docs.get(&canonical_path) {
+            existing.clone()
+        } else {
+            let content = std::fs::read_to_string(&canonical_path)?;
+            self.linked_docs.insert(canonical_path.clone(), content.clone());
+            content
+        };
+
+        if let Some(anchor) = section_anchor {
+            let index_key = format!("{}#{}", canonical_path.display(), anchor);
+            if let Some(existing) = self.linked_sections.get(&index_key) {
+                return Ok(existing.clone());
+            }
+
+            let extracted = extract_section_by_anchor(&doc_text, anchor).ok_or_else(|| {
+                blockcell_core::Error::Skill(format!(
+                    "Skill markdown section '{}' not found in {}",
+                    anchor,
+                    canonical_path.display()
+                ))
+            })?;
+            self.linked_sections
+                .insert(index_key, extracted.clone());
+            Ok(extracted)
+        } else {
+            Ok(doc_text)
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MarkdownSection {
+    level: usize,
+    explicit_anchor: Option<String>,
+    slug_anchor: String,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug, Clone)]
+struct MarkdownLink {
+    start: usize,
+    end: usize,
+    target: String,
+}
+
+fn join_markdown_parts(parts: &[&str]) -> String {
+    parts
+        .iter()
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn parse_markdown_sections(content: &str) -> Vec<MarkdownSection> {
+    let mut sections = Vec::new();
+    let mut offset = 0usize;
+
+    for line in content.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+        if let Some((level, title, explicit_anchor)) = parse_heading_line(trimmed) {
+            sections.push(MarkdownSection {
+                level,
+                explicit_anchor,
+                slug_anchor: slugify_anchor(&title),
+                start: offset,
+                end: content.len(),
+            });
+        }
+        offset += line.len();
+    }
+
+    for index in 0..sections.len() {
+        let level = sections[index].level;
+        let next_start = sections[index + 1..]
+            .iter()
+            .find(|candidate| candidate.level <= level)
+            .map(|candidate| candidate.start)
+            .unwrap_or(content.len());
+        sections[index].end = next_start;
+    }
+
+    sections
+}
+
+fn parse_heading_line(line: &str) -> Option<(usize, String, Option<String>)> {
+    let level = line.chars().take_while(|ch| *ch == '#').count();
+    if level == 0 || level > 6 {
+        return None;
+    }
+
+    let remainder = line[level..].strip_prefix(' ')?;
+    let mut title = remainder.trim().to_string();
+    let mut explicit_anchor = None;
+
+    if title.ends_with('}') {
+        if let Some(start) = title.rfind("{#") {
+            let anchor = title[start + 2..title.len() - 1].trim();
+            if !anchor.is_empty() {
+                explicit_anchor = Some(anchor.to_string());
+                title = title[..start].trim().to_string();
+            }
+        }
+    }
+
+    Some((level, title, explicit_anchor))
+}
+
+fn slugify_anchor(value: &str) -> String {
+    let mut slug = String::new();
+    let mut previous_was_dash = false;
+
+    for ch in value.chars().flat_map(|ch| ch.to_lowercase()) {
+        if ch.is_alphanumeric() {
+            slug.push(ch);
+            previous_was_dash = false;
+        } else if !previous_was_dash {
+            slug.push('-');
+            previous_was_dash = true;
+        }
+    }
+
+    slug.trim_matches('-').to_string()
+}
+
+fn find_section<'a>(sections: &'a [MarkdownSection], anchor: &str) -> Option<&'a MarkdownSection> {
+    sections
+        .iter()
+        .find(|section| section.explicit_anchor.as_deref() == Some(anchor))
+        .or_else(|| {
+            let slug = slugify_anchor(anchor);
+            sections
+                .iter()
+                .find(|section| !slug.is_empty() && section.slug_anchor == slug)
+        })
+}
+
+fn extract_section_by_anchor(content: &str, anchor: &str) -> Option<String> {
+    let sections = parse_markdown_sections(content);
+    let section = find_section(&sections, anchor)?;
+    Some(content[section.start..section.end].trim().to_string())
+}
+
+fn extract_markdown_links(line: &str) -> Vec<MarkdownLink> {
+    let mut links = Vec::new();
+    let mut search_from = 0usize;
+
+    while let Some(label_start_rel) = line[search_from..].find('[') {
+        let label_start = search_from + label_start_rel;
+        let Some(label_end_rel) = line[label_start + 1..].find("](") else {
+            break;
+        };
+        let label_end = label_start + 1 + label_end_rel;
+        let Some(target_end_rel) = line[label_end + 2..].find(')') else {
+            break;
+        };
+        let target_end = label_end + 2 + target_end_rel;
+        let target = &line[label_end + 2..target_end];
+        links.push(MarkdownLink {
+            start: label_start,
+            end: target_end + 1,
+            target: target.to_string(),
+        });
+        search_from = target_end + 1;
+    }
+
+    links
+}
+
+fn strip_markdown_list_prefix(line: &str) -> &str {
+    let trimmed = line.trim();
+    for prefix in ["- ", "* ", "+ "] {
+        if let Some(rest) = trimmed.strip_prefix(prefix) {
+            return rest.trim();
+        }
+    }
+
+    let digit_count = trimmed.chars().take_while(|ch| ch.is_ascii_digit()).count();
+    if digit_count > 0 {
+        let rest = &trimmed[digit_count..];
+        if let Some(rest) = rest.strip_prefix(". ").or_else(|| rest.strip_prefix(") ")) {
+            return rest.trim();
+        }
+    }
+
+    trimmed
+}
+
+fn is_link_only_line(line: &str, link: &MarkdownLink) -> bool {
+    strip_markdown_list_prefix(line) == line[link.start..link.end].trim()
+}
+
+fn is_local_markdown_target(target: &str) -> bool {
+    split_markdown_target(target).is_some()
+}
+
+fn split_markdown_target(target: &str) -> Option<(&str, Option<&str>)> {
+    if target.trim().is_empty()
+        || target.starts_with('#')
+        || target.contains("://")
+        || target.starts_with("mailto:")
+    {
+        return None;
+    }
+
+    let mut parts = target.splitn(2, '#');
+    let relative_path = parts.next()?.trim();
+    if relative_path.is_empty() || !relative_path.ends_with(".md") {
+        return None;
+    }
+
+    let anchor = parts.next().map(str::trim).filter(|value| !value.is_empty());
+    Some((relative_path, anchor))
+}
+
+fn resolve_markdown_path(skill_dir: &Path, relative_path: &str) -> Result<PathBuf> {
+    let candidate = Path::new(relative_path);
+    if candidate.is_absolute() {
+        return Err(blockcell_core::Error::Skill(format!(
+            "Skill markdown link '{}' must be relative",
+            relative_path
+        )));
+    }
+
+    let joined = skill_dir.join(candidate);
+    let canonical_skill_dir = std::fs::canonicalize(skill_dir)?;
+    let canonical_target = std::fs::canonicalize(&joined).map_err(|_| {
+        blockcell_core::Error::Skill(format!(
+            "Skill markdown link '{}' does not exist",
+            relative_path
+        ))
+    })?;
+
+    if !canonical_target.starts_with(&canonical_skill_dir) {
+        return Err(blockcell_core::Error::Skill(format!(
+            "Skill markdown link '{}' resolves outside the skill directory",
+            relative_path
+        )));
+    }
+
+    Ok(canonical_target)
 }
 
 #[derive(Debug, Clone)]
@@ -187,8 +440,8 @@ pub struct Skill {
     pub available: bool,
     pub unavailable_reason: Option<String>,
     pub current_version: Option<String>,
-    /// SKILL.md content cached at load time — avoids disk I/O on every skill match.
-    pub cached_md: Option<String>,
+    /// Root SKILL.md and compiled phase bundles cached at load time.
+    cached_docs: Option<SkillDocCache>,
 }
 
 impl Skill {
@@ -204,12 +457,33 @@ impl Skill {
 
     /// Return the SKILL.md content, using the in-memory cache populated at load time.
     pub fn load_md(&self) -> Option<String> {
-        if self.cached_md.is_some() {
-            return self.cached_md.clone();
+        if let Some(cached_docs) = &self.cached_docs {
+            return Some(cached_docs.root_md.clone());
         }
         // Fallback: read from disk (e.g. if skill was constructed outside SkillManager)
         let md_path = self.path.join("SKILL.md");
         std::fs::read_to_string(md_path).ok()
+    }
+
+    pub fn load_prompt_bundle(&self) -> Option<String> {
+        self.cached_docs
+            .as_ref()
+            .map(|cached_docs| cached_docs.prompt_bundle.clone())
+            .or_else(|| self.load_md())
+    }
+
+    pub fn load_planning_bundle(&self) -> Option<String> {
+        self.cached_docs
+            .as_ref()
+            .map(|cached_docs| cached_docs.planning_bundle.clone())
+            .or_else(|| self.load_md())
+    }
+
+    pub fn load_summary_bundle(&self) -> Option<String> {
+        self.cached_docs
+            .as_ref()
+            .map(|cached_docs| cached_docs.summary_bundle.clone())
+            .or_else(|| self.load_md())
     }
 
     /// Load the SKILL.rhai script content.
@@ -415,7 +689,7 @@ impl SkillManager {
             None
         };
 
-        let cached_md = std::fs::read_to_string(skill_dir.join("SKILL.md")).ok();
+        let cached_docs = SkillDocCache::load(skill_dir)?;
         Ok(Some(Skill {
             name: if meta.name.is_empty() {
                 name
@@ -427,7 +701,7 @@ impl SkillManager {
             available,
             unavailable_reason: reason,
             current_version,
-            cached_md,
+            cached_docs,
         }))
     }
 
@@ -538,7 +812,7 @@ impl SkillManager {
                 s.meta
                     .triggers
                     .iter()
-                    .any(|trigger| input_lower.contains(&trigger.to_lowercase()))
+                    .any(|trigger: &String| input_lower.contains(&trigger.to_lowercase()))
             })
     }
 
@@ -559,7 +833,7 @@ impl SkillManager {
                     && s.meta
                         .triggers
                         .iter()
-                        .any(|trigger| input_lower.contains(&trigger.to_lowercase()))
+                        .any(|trigger: &String| input_lower.contains(&trigger.to_lowercase()))
             })
             .collect()
     }
@@ -676,6 +950,18 @@ impl Default for SkillManager {
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_skill_dir(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{}-{}-{}", prefix, std::process::id(), nonce));
+        fs::create_dir_all(&dir).expect("create temp skill dir");
+        dir
+    }
 
     #[test]
     fn test_skill_meta_prefers_tools_over_capabilities() {
@@ -732,7 +1018,7 @@ capabilities:
                     available: true,
                     unavailable_reason: None,
                     current_version: None,
-                    cached_md: None,
+                    cached_docs: None,
                 },
             ),
             (
@@ -748,7 +1034,7 @@ capabilities:
                     available: true,
                     unavailable_reason: None,
                     current_version: None,
-                    cached_md: None,
+                    cached_docs: None,
                 },
             ),
         ]);
@@ -763,61 +1049,183 @@ capabilities:
     }
 
     #[test]
-    fn test_skill_execution_parses_dispatch_kind_and_summary_mode() {
+    fn test_skill_meta_serializes_without_execution_contract_fields() {
         let meta: SkillMeta = serde_yaml::from_str(
             r#"
-name: tavily
-execution:
-  kind: python
-  entry: SKILL.py
-  dispatch_kind: argv
-  summary_mode: llm
+name: demo
+description: minimal
+triggers:
+  - "demo"
+permissions:
+  - network
+requires:
+  bins: ["python3"]
+fallback:
+  strategy: degrade
+  message: failed
 "#,
         )
         .expect("meta should parse");
 
-        let execution = meta.execution.expect("execution should exist");
-        assert_eq!(execution.kind, "python");
-        assert_eq!(execution.dispatch_kind, "argv");
-        assert_eq!(execution.summary_mode, "llm");
+        assert_eq!(meta.name, "demo");
+        assert_eq!(meta.description, "minimal");
+        assert_eq!(meta.triggers, vec!["demo"]);
+        assert_eq!(meta.permissions, vec!["network"]);
+        assert_eq!(meta.requires.bins, vec!["python3"]);
+        assert_eq!(
+            meta.fallback
+                .as_ref()
+                .and_then(|fallback| fallback.message.as_deref()),
+            Some("failed")
+        );
+
+        let value = serde_json::to_value(&meta).expect("serialize skill meta");
+        assert!(value.get("execution").is_none());
+        assert!(value.get("actions").is_none());
+        assert!(value.get("dispatch_kind").is_none());
+        assert!(value.get("summary_mode").is_none());
     }
 
     #[test]
-    fn test_skill_execution_defaults_dispatch_kind_by_runtime_kind() {
-        let python_meta: SkillMeta = serde_yaml::from_str(
+    fn test_skill_meta_drops_legacy_execution_block_when_reserialized() {
+        let meta: SkillMeta = serde_yaml::from_str(
             r#"
-name: py_demo
+name: demo
+description: legacy
+triggers:
+  - "demo"
 execution:
   kind: python
+  entry: SKILL.py
+  actions:
+    - name: search
+      argv: ["search", "{query}"]
 "#,
         )
-        .expect("python meta should parse");
-        let rhai_meta: SkillMeta = serde_yaml::from_str(
-            r#"
-name: rhai_demo
-execution:
-  kind: rhai
-"#,
-        )
-        .expect("rhai meta should parse");
-        let markdown_meta: SkillMeta = serde_yaml::from_str(
-            r#"
-name: md_demo
-execution:
-  kind: markdown
-"#,
-        )
-        .expect("markdown meta should parse");
+        .expect("legacy meta should still parse");
 
-        let python_execution = python_meta.execution.expect("python execution");
-        let rhai_execution = rhai_meta.execution.expect("rhai execution");
-        let markdown_execution = markdown_meta.execution.expect("markdown execution");
+        let value = serde_json::to_value(&meta).expect("serialize skill meta");
+        assert_eq!(value.get("name").and_then(|v| v.as_str()), Some("demo"));
+        assert!(value.get("execution").is_none());
+    }
 
-        assert_eq!(python_execution.effective_dispatch_kind(), "argv");
-        assert_eq!(rhai_execution.effective_dispatch_kind(), "context");
-        assert_eq!(markdown_execution.effective_dispatch_kind(), "prompt");
-        assert_eq!(python_execution.effective_summary_mode(), "llm");
-        assert_eq!(rhai_execution.effective_summary_mode(), "llm");
-        assert_eq!(markdown_execution.effective_summary_mode(), "direct");
+    #[test]
+    fn test_skill_doc_bundles_expand_root_markdown_links_in_order() {
+        let skill_dir = temp_skill_dir("blockcell-skill-doc-bundles");
+        fs::create_dir_all(skill_dir.join("manual")).expect("create manual dir");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"# Demo Skill
+
+## Shared {#shared}
+Shared preface.
+- [Shared rules](manual/shared.md#rules)
+
+## Prompt {#prompt}
+Prompt rules.
+
+## Planning {#planning}
+Planning intro.
+- [Build argv](manual/planning.md#build-argv)
+Planning tail.
+
+## Summary {#summary}
+Summary intro.
+- [Final answer](manual/summary.md#final-answer)
+"#,
+        )
+        .expect("write root skill md");
+        fs::write(
+            skill_dir.join("manual/shared.md"),
+            r#"## Shared rules {#rules}
+Use cached auth token.
+- [Do not expand](nested.md#ignored)
+"#,
+        )
+        .expect("write shared child md");
+        fs::write(
+            skill_dir.join("manual/planning.md"),
+            r#"## Build argv {#build-argv}
+argv[0] must be the action.
+
+### Flags
+Keep deterministic ordering.
+
+## Other {#other}
+ignore me
+"#,
+        )
+        .expect("write planning child md");
+        fs::write(
+            skill_dir.join("manual/summary.md"),
+            r#"## Final answer {#final-answer}
+Summarize in Chinese with concise bullets.
+"#,
+        )
+        .expect("write summary child md");
+
+        let manager = SkillManager::new();
+        let skill = manager
+            .load_skill(&skill_dir)
+            .expect("load skill result")
+            .expect("skill should load");
+
+        let prompt_bundle = skill
+            .load_prompt_bundle()
+            .expect("prompt bundle should be cached");
+        let planning_bundle = skill
+            .load_planning_bundle()
+            .expect("planning bundle should be cached");
+        let summary_bundle = skill
+            .load_summary_bundle()
+            .expect("summary bundle should be cached");
+
+        assert!(prompt_bundle.contains("Shared preface."));
+        assert!(prompt_bundle.contains("Use cached auth token."));
+        assert!(prompt_bundle.contains("Prompt rules."));
+        assert!(!prompt_bundle.contains("argv[0] must be the action."));
+
+        let shared_index = planning_bundle.find("Shared preface.").expect("shared in planning");
+        let child_index = planning_bundle
+            .find("argv[0] must be the action.")
+            .expect("planning child in bundle");
+        let tail_index = planning_bundle
+            .find("Planning tail.")
+            .expect("planning tail in bundle");
+        assert!(shared_index < child_index);
+        assert!(child_index < tail_index);
+        assert!(planning_bundle.contains("Keep deterministic ordering."));
+        assert!(planning_bundle.contains("[Do not expand](nested.md#ignored)"));
+        assert!(!planning_bundle.contains("ignore me"));
+
+        assert!(summary_bundle.contains("Summary intro."));
+        assert!(summary_bundle.contains("Summarize in Chinese with concise bullets."));
+        assert!(!summary_bundle.contains("Planning intro."));
+    }
+
+    #[test]
+    fn test_skill_doc_bundles_reject_parent_path_escape() {
+        let skill_dir = temp_skill_dir("blockcell-skill-doc-escape");
+        let outside_file = skill_dir
+            .parent()
+            .expect("temp skill dir should have parent")
+            .join("secret.md");
+        fs::write(&outside_file, "## Hack {#hack}\nsecret\n").expect("write outside file");
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"# Escape Demo
+
+## Planning {#planning}
+- [Oops](../secret.md#hack)
+"#,
+        )
+        .expect("write root skill md");
+
+        let manager = SkillManager::new();
+        let err = manager
+            .load_skill(&skill_dir)
+            .expect_err("parent escape should fail");
+
+        assert!(format!("{}", err).contains("outside"));
     }
 }

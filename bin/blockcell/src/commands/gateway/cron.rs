@@ -87,33 +87,19 @@ fn build_manual_cron_inbound(job: &CronJob, agent_id: &str) -> InboundMessage {
             }),
         ),
         "script" => {
-            let kind = job.payload.script_kind.as_deref().unwrap_or("rhai");
             let skill_name = job.payload.skill_name.as_deref().unwrap_or("unknown");
-            let mut meta = serde_json::json!({
+            let meta = serde_json::json!({
                 "job_id": job.id,
                 "job_name": job.name,
                 "manual_trigger": true,
-                "skill_script": true,
-                "skill_script_kind": kind,
                 "skill_name": skill_name,
+                "forced_skill_name": skill_name,
+                "skill_run_mode": "cron",
                 "deliver": job.payload.deliver,
                 "deliver_channel": job.payload.channel,
                 "deliver_to": job.payload.to,
             });
-            if kind == "python" {
-                meta["skill_python"] = serde_json::json!(true);
-            } else if kind == "markdown" {
-                meta["skill_markdown"] = serde_json::json!(true);
-            } else {
-                meta["skill_rhai"] = serde_json::json!(true);
-            }
-            (
-                format!(
-                    "[系统定时任务] 执行技能脚本 {} — {}",
-                    skill_name, job.payload.message
-                ),
-                meta,
-            )
+            (job.payload.message.clone(), meta)
         }
         "agent" => (
             job.payload.message.clone(),
@@ -343,20 +329,20 @@ mod tests {
     #[test]
     fn test_build_manual_cron_inbound_routes_script_with_current_kind_flags() {
         let inbound = build_manual_cron_inbound(&test_job("script"), "default");
-        assert!(inbound.content.contains("执行技能脚本 weather"));
+        assert_eq!(inbound.content, "payload body");
         assert_eq!(
             inbound
                 .metadata
-                .get("skill_script")
-                .and_then(|v| v.as_bool()),
-            Some(true)
+                .get("forced_skill_name")
+                .and_then(|v| v.as_str()),
+            Some("weather")
         );
         assert_eq!(
             inbound
                 .metadata
-                .get("skill_script_kind")
+                .get("skill_run_mode")
                 .and_then(|v| v.as_str()),
-            Some("markdown")
+            Some("cron")
         );
         assert_eq!(
             inbound

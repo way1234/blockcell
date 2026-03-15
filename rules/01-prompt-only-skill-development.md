@@ -1,156 +1,124 @@
-# Prompt-Only Skill Development
+# Prompt Skill Development
 
-## 适用范围
+## 1. 什么时候用
 
-适用于只有 `SKILL.md` 驱动、主要依赖内置工具组合完成任务的技能。
+Prompt Skill 适合：
 
-适合这种类型的场景：
-
-- 主要是流程引导、参数澄清、工具选择、输出格式控制
-- 不需要强确定性脚本编排
-- 不依赖 Python 第三方库或外部运行时
-- 允许由 LLM 在技能作用域内自主决定工具调用顺序
+- 主要依赖 `SKILL.md` 约束模型行为
+- 主要通过 blockcell 工具完成任务
+- 不需要脚本级确定性编排
 
 不适合：
 
-- 多分支、强状态、强确定性流程
-- 需要保存和操作复杂内部参数
-- 需要直接接第三方 HTTP/API/浏览器自动化逻辑且想严格控流程
+- 多分支、重试、强流程控制
+- 需要复杂外部协议处理
+- 需要依赖第三方 SDK
 
-## 推荐目录结构
+## 2. 目录结构
 
 ```text
 skills/<skill_name>/
 ├── meta.yaml
-└── SKILL.md
+├── SKILL.md
+└── manual/
+    └── prompt.md
 ```
 
-`SKILL.rhai`、`SKILL.py` 不应存在。
+`manual/` 是可选目录。简单 skill 可以只保留一个根 `SKILL.md`。
 
-## 运行时链路
+## 3. `meta.yaml` 写法
 
-当前实现里，prompt-only skill 的核心路径是：
-
-1. 用户输入命中 `meta.yaml.triggers`
-2. runtime 识别为 `PromptOnly`
-3. `SKILL.md` 被直接注入系统提示词
-4. 只加载该 skill 声明过的工具作用域
-5. LLM 在该作用域内决定是否提问、调用工具、整理最终回复
-
-这意味着：
-
-- `SKILL.md` 是主执行说明书，不是附属文档
-- `SKILL.md` 内容会直接吃 prompt token
-- 写得过长、过散、过像人类说明文，会直接降低效果
-
-## meta.yaml 规范
-
-建议最少包含：
+推荐：
 
 ```yaml
-name: camera
-description: "拍照技能"
+name: travel_plan
+description: 规划出行方案并整理建议
 triggers:
-  - "拍照"
-  - "拍张照"
+  - 旅游攻略
+  - 行程规划
 tools:
-  - "camera_capture"
-output_format: "markdown"
+  - web_search
+  - read_file
 fallback:
-  strategy: "degrade"
-  message: "当前无法完成拍照，请稍后重试。"
+  strategy: degrade
+  message: 当前无法完成这次出行规划，请稍后重试。
 ```
 
 规则：
 
-- `triggers` 要覆盖用户真实说法，不要只写内部术语
-- `tools`/`capabilities` 只声明真正需要的工具，越少越好
-- `output_format` 只写结果形态提示，不要拿它代替格式规则
-- 新技能优先使用 `tools`，不要继续扩散旧字段 `capabilities`
-- 不要为 prompt-only skill 配 `execution.actions`
+- `tools` 只写真正要用的工具。
+- `triggers` 覆盖真实用户说法。
+- `meta.yaml` 只承载最小元数据。
 
-## SKILL.md 写法
+## 4. `SKILL.md` 应该怎么写
 
-### 必写内容
+Prompt Skill 的根 `SKILL.md` 重点写 4 类规则：
 
-- 这个 skill 解决什么问题
-- 遇到什么输入先澄清，什么输入可以直接执行
-- 工具调用顺序或决策原则
-- 输出格式要求
-- 失败时如何降级或提示用户
-- 2 到 5 个高质量示例
+1. 什么时候先澄清，什么时候直接执行。
+2. 工具使用顺序或决策原则。
+3. 最终输出格式。
 
-### 应该避免
-
-- 大段背景介绍
-- 长篇参数表
-- 复制工具 schema
-- 和 `meta.yaml` 重复的触发词清单
-- 纯人类读物风格的叙述
-
-### 推荐结构
+推荐结构：
 
 ```markdown
-# <Skill Name>
+# <skill name>
 
-## 任务
-- 说明 skill 目标
+## Shared {#shared}
+- 解决什么问题
 
-## 澄清规则
-- 什么情况下先问
-- 什么情况下直接做
-
-## 工具使用
-- 先调用什么
-- 失败怎么降级
-
-## 输出格式
-- 最终回复如何排版
-
-## 示例
-- 示例 1
-- 示例 2
+## Prompt {#prompt}
+- 缺什么先问
+- 什么情况直接做
+- 优先用什么工具
+- 不要调用什么工具
+- 最终答案的结构
+- 不要暴露什么
 ```
 
-## 开发建议
+复杂 skill 推荐把长规则拆到子文档，再通过标准 markdown 链接接入：
 
-- 把 `SKILL.md` 当作“执行手册”，不是“产品说明”
-- 优先写规则和反规则，不要写空泛目标
-- 明确“不要做什么”，例如：
-  - 不要编造字段
-  - 不要调用作用域外工具
-  - 不要把工具错误原样甩给用户
-- 如果 follow-up 很重要，直接在 `SKILL.md` 写清：
-  - 用户说“第 2 个”“刚才那个”时该如何理解
+```md
+## Prompt {#prompt}
+- [澄清规则](manual/prompt.md#clarify)
+- [工具规则](manual/prompt.md#tools)
+- [输出规则](manual/prompt.md#output)
+```
 
-## 测试要求
+## 5. 运行时行为
 
-至少做这几类验证：
+Prompt Skill 的运行时文档 bundle 为：
 
-1. 触发验证
-   - 用户常见说法能否命中 skill
-2. 澄清验证
-   - 参数不全时是否先提问
-3. 工具作用域验证
-   - 是否只使用声明过的工具
-4. 输出验证
-   - 最终格式是否稳定
+- `shared + prompt`
 
-推荐做法：
+Prompt Skill 的实际流程是：
 
-- 在 WebUI / gateway 里走真实对话验证
-- 至少准备 3 组真实用户输入作为回归样例
+1. 命中 skill。
+2. runtime 读取并拼接 `prompt_bundle`。
+3. runtime 只开放 `meta.yaml.tools` 里的工具。
+4. 模型在受控工具范围内完成提问、调用工具、整理答案。
+5. 完整 tool 链路写入主历史。
 
-## 常见错误
+这意味着：
 
-- `SKILL.md` 写成百科或产品介绍，真正可执行规则太少
-- `tools` 声明过多，导致 LLM 漫游
-- 该先澄清时没澄清
-- 输出格式要求只写“清晰友好”，没有给具体例子
-- 想做强确定性流程却还在用 prompt-only
+- 根 `SKILL.md` 是入口文档。
+- 子文档只是根 `SKILL.md` 的可拆分扩展。
+- 写得越空泛，运行效果越差。
+- `tools` 越宽，模型越容易漂移。
 
-## 推荐实践
+## 6. 测试要求
 
-- 参考 [camera](../skills/camera/SKILL.md) 和 [camera meta](../skills/camera/meta.yaml)
-- 需要强编排时，升级成 Rhai skill
-- 需要第三方运行时或外部库时，升级成 Python skill
+至少验证：
+
+1. 常见用户说法能命中 skill。
+2. 参数不足时会先澄清。
+3. 只会调用白名单工具。
+4. 输出格式稳定。
+6. 根 `SKILL.md` 中的文档链接都能解析到有效 section。
+
+## 7. 常见错误
+
+- 根 `SKILL.md` 没有显式 `#prompt` 章节。
+- 子文档 section 没有稳定 id。
+- `tools` 声明过多。
+- 输出规则只有目标，没有格式。
+- 需要脚本编排的 skill 仍然做成 Prompt Skill。

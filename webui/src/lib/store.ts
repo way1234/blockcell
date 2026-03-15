@@ -59,6 +59,29 @@ function buildReminderPreview(content?: string) {
   return candidate.length > 96 ? `${candidate.slice(0, 96).trimEnd()}...` : candidate;
 }
 
+function deriveSessionNameFromContent(content?: string) {
+  const trimmed = (content || '').trim();
+  if (!trimmed) return undefined;
+
+  const name = trimmed.slice(0, 30).trimEnd();
+  if (!name) return undefined;
+  return trimmed.length > 30 ? `${name}…` : name;
+}
+
+function deriveSessionNameFromMessages(messages: UiMessage[]) {
+  const firstUserMessage = messages.find((message) => {
+    if (message.role !== 'user') return false;
+    return !!deriveSessionNameFromContent(message.content);
+  });
+
+  return firstUserMessage ? deriveSessionNameFromContent(firstUserMessage.content) : undefined;
+}
+
+function isFallbackSessionName(name: string | undefined, sessionIds: string[]) {
+  if (!name) return true;
+  return sessionIds.some((sessionId) => sessionId && normalizeSessionId(name) === normalizeSessionId(sessionId));
+}
+
 function ensureSessionExists(state: ChatState, sessionId: string): SessionInfo[] {
   if (state.sessions.some((s) => s.id === sessionId)) {
     return state.sessions;
@@ -252,11 +275,26 @@ export const useChatStore = create<ChatState>((set, get) => ({
         const normalizedClientId = normalizeSessionId(event.client_chat_id || '');
 
         set((innerState) => {
+          const existingClientSession = normalizedClientId
+            ? innerState.sessions.find((s) => s.id === normalizedClientId)
+            : undefined;
+          const existingRealSession = innerState.sessions.find((s) => s.id === normalizedRealId);
+          const preferredName = (() => {
+            const existingName = existingClientSession?.name || existingRealSession?.name;
+            if (!isFallbackSessionName(existingName, [normalizedClientId, normalizedRealId])) {
+              return existingName;
+            }
+            return deriveSessionNameFromMessages(innerState.messages);
+          })();
           const sessionsWithoutClient = normalizedClientId
             ? innerState.sessions.filter((s) => s.id !== normalizedClientId && s.id !== normalizedRealId)
             : innerState.sessions.filter((s) => s.id !== normalizedRealId);
 
-          const promoted = promoteSession({ ...innerState, sessions: sessionsWithoutClient }, normalizedRealId);
+          const promoted = promoteSession(
+            { ...innerState, sessions: sessionsWithoutClient },
+            normalizedRealId,
+            preferredName,
+          );
           const shouldSwitchCurrent =
             !innerState.currentSessionId
             || !normalizedClientId
