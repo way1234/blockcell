@@ -178,6 +178,7 @@ pub async fn test(tool_name: &str, params_json: &str) -> anyhow::Result<()> {
         core_evolution: None,
         event_emitter: None,
         channel_contacts_file: Some(paths.channel_contacts_file()),
+        response_cache: None,
     };
 
     println!("⏳ Executing {} ...", tool_name);

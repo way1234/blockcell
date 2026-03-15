@@ -32,6 +32,7 @@ use crate::skills::ListSkillsTool;
 use crate::spawn::SpawnTool;
 use crate::stream_subscribe::StreamSubscribeTool;
 use crate::system_info::{CapabilityEvolveTool, SystemInfoTool};
+use crate::session_recall::SessionRecallTool;
 use crate::tasks::ListTasksTool;
 use crate::termux_api::TermuxApiTool;
 use crate::toggle_manage::ToggleManageTool;
@@ -175,6 +176,9 @@ impl ToolRegistry {
 
         // Termux API (Android device control via Termux)
         registry.register(Arc::new(TermuxApiTool));
+
+        // Session response cache recall
+        registry.register(Arc::new(SessionRecallTool));
 
         registry
     }

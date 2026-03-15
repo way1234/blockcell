@@ -1,4 +1,5 @@
 pub mod agent_status;
+pub mod session_recall;
 pub mod alert_rule;
 pub mod app_control;
 pub mod audio_transcribe;
@@ -89,6 +90,9 @@ pub type TaskManagerHandle = Arc<dyn TaskManagerOps + Send + Sync>;
 
 /// Opaque handle to the memory store, passed through ToolContext.
 pub type MemoryStoreHandle = Arc<dyn MemoryStoreOps + Send + Sync>;
+
+/// Opaque handle to the response cache, passed through ToolContext.
+pub type ResponseCacheHandle = Arc<dyn ResponseCacheOps + Send + Sync>;
 
 /// Opaque handle to the capability registry, passed through ToolContext.
 pub type CapabilityRegistryHandle = Arc<Mutex<dyn CapabilityRegistryOps + Send + Sync>>;
@@ -181,6 +185,13 @@ pub trait MemoryStoreOps: Send + Sync {
     fn maintenance(&self, recycle_days: i64) -> Result<(usize, usize)>;
 }
 
+/// Trait abstracting session response cache operations needed by tools.
+/// The cache stores large list/table responses and allows retrieval by ref_id.
+pub trait ResponseCacheOps: Send + Sync {
+    /// Recall a cached response by ref_id. Returns JSON string.
+    fn recall_json(&self, session_key: &str, ref_id: &str) -> String;
+}
+
 /// Trait abstracting task manager operations needed by tools.
 #[async_trait]
 pub trait TaskManagerOps: Send + Sync {
@@ -208,6 +219,8 @@ pub struct ToolContext {
     pub event_emitter: Option<EventEmitterHandle>,
     /// Path to channel_contacts.json for cross-channel contact lookup.
     pub channel_contacts_file: Option<PathBuf>,
+    /// Session response cache handle for session_recall tool.
+    pub response_cache: Option<ResponseCacheHandle>,
 }
 
 pub struct ToolSchema {

@@ -95,6 +95,7 @@ pub async fn tool(tool_name: &str, params_json: &str, agent: Option<&str>) -> an
         core_evolution: None,
         event_emitter: None,
         channel_contacts_file: Some(paths.channel_contacts_file()),
+        response_cache: None,
     };
 
     let result: serde_json::Value = tool.execute(ctx, params).await?;

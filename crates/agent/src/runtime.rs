@@ -1462,6 +1462,8 @@ pub struct AgentRuntime {
     channel_contacts: blockcell_storage::ChannelContacts,
     /// Loaded path-access policy engine (from `~/.blockcell/path_access.json5`).
     path_policy: PathPolicy,
+    /// Per-session cache for large list/table responses (prevents history token explosion).
+    response_cache: crate::response_cache::ResponseCache,
 }
 
 impl AgentRuntime {
@@ -1523,6 +1525,7 @@ impl AgentRuntime {
             cap_request_cooldown: HashMap::new(),
             channel_contacts,
             path_policy,
+            response_cache: crate::response_cache::ResponseCache::new(),
         })
     }
 
@@ -3171,6 +3174,16 @@ impl AgentRuntime {
         // real function calling mechanism. Remove these before sending to user.
         let final_response = strip_fake_tool_calls(&final_response);
 
+        // Cache large list/table responses to prevent history token explosion.
+        // Replaces the last assistant history entry with a compact stub; full content
+        // is retrievable via the session_recall tool.
+        if let Some(stub) = self
+            .response_cache
+            .maybe_cache_and_stub(&persist_session_key, &final_response)
+        {
+            overwrite_last_assistant_message(&mut history, &stub);
+        }
+
         // Save session
         self.session_store
             .save_with_metadata(&persist_session_key, &history, &session_metadata)?;
@@ -3702,6 +3715,7 @@ impl AgentRuntime {
             core_evolution: self.core_evolution.clone(),
             event_emitter: Some(self.system_event_emitter.clone()),
             channel_contacts_file: Some(self.paths.channel_contacts_file()),
+            response_cache: Some(Arc::new(self.response_cache.clone()) as blockcell_tools::ResponseCacheHandle),
         };
 
         // Emit tool_call_start event to WebSocket clients
@@ -4176,6 +4190,7 @@ impl AgentRuntime {
                     core_evolution: core_evolution.clone(),
                     event_emitter: Some(event_emitter.clone()),
                     channel_contacts_file: Some(paths.channel_contacts_file()),
+                    response_cache: None,
                 };
 
                 // Execute tool synchronously via a new tokio runtime handle
@@ -5604,6 +5619,7 @@ mod tests {
             core_evolution: None,
             event_emitter: Some(Arc::new(NoopEmitter)),
             channel_contacts_file: None,
+            response_cache: None,
         };
 
         assert!(ctx.event_emitter.is_some());

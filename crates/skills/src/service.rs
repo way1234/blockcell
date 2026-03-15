@@ -55,6 +55,7 @@ const BUILTIN_TOOLS: &[&str] = &[
     "memory_maintenance",
     "toggle_manage",
     "termux_api",
+    "session_recall",
 ];
 
 /// Check if a skill name is a built-in tool (should not trigger evolution).

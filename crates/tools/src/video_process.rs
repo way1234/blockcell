@@ -864,6 +864,7 @@ mod tests {
             core_evolution: None,
             event_emitter: None,
             channel_contacts_file: None,
+            response_cache: None,
         };
         assert_eq!(
             resolve_path(&ctx, "/absolute/path.mp4"),
